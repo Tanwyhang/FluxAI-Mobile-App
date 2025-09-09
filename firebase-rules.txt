@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users can read and write their own user documents
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      // Allow reading any user document for team member addition
+      allow read: if request.auth != null;
+    }
+
+    // Allow querying users collection by any field (including githubUsername)
+    match /users/{document=**} {
+      allow read: if request.auth != null;
+    }
+
+    // Admin collection - users can read their own admin document
+    match /admins/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Admin profiles - only the admin can read/write their own profile
+    match /adminProfiles/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Team member profiles - only the team member can read/write their own profile
+    match /teamMemberProfiles/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Teams collection rules
+    match /teams/{teamId} {
+      // Admins can read/write teams they created (using both adminId and createdBy fields)
+      allow read, write: if request.auth != null &&
+        (request.auth.uid == resource.data.adminId || request.auth.uid == resource.data.createdBy);
+
+      // Team members can read teams they belong to
+      allow read: if request.auth != null &&
+        exists(/databases/$(database)/documents/teamMembers/$(request.auth.uid));
+    }
+
+    // Allow querying teams by any field
+    match /teams/{document=**} {
+      allow read: if request.auth != null;
+    }
+
+    // Team members collection rules
+    match /teamMembers/{membershipId} {
+      // Allow users to read their own team membership record
+      allow read, write: if request.auth != null &&
+        request.auth.uid == membershipId;
+
+      // Allow users to read membership records where they are the userId
+      allow read: if request.auth != null &&
+        request.auth.uid == resource.data.userId;
+
+      // Allow admins to read/write team memberships for their teams
+      allow read, write: if request.auth != null &&
+        (request.auth.uid == get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.adminId ||
+         request.auth.uid == get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.createdBy);
+
+      // Allow creating new team memberships
+      allow create: if request.auth != null;
+    }
+
+    // Allow querying teamMembers collection
+    match /teamMembers/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Team Attendance Codes collection rules
+    match /teamAttendanceCodes/{codeId} {
+      // Allow authenticated users to read attendance codes
+      allow read: if request.auth != null;
+
+      // Allow authenticated users to write attendance codes
+      allow write: if request.auth != null;
+
+      // Allow creating new attendance codes
+      allow create: if request.auth != null;
+    }
+
+    // Allow querying attendance codes
+    match /teamAttendanceCodes/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Attendance records - users can read/write their own attendance
+    match /attendance/{attendanceId} {
+      allow read, write: if request.auth != null &&
+        request.auth.uid == resource.data.userId;
+
+      // Allow creating attendance records
+      allow create: if request.auth != null;
+
+      // Admins can read attendance records for their teams
+      allow read: if request.auth != null &&
+        (request.auth.uid == get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.adminId ||
+         request.auth.uid == get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.createdBy);
+    }
+
+    // Allow querying attendance records
+    match /attendance/{document=**} {
+      allow read: if request.auth != null;
+    }
+
+    // Default deny all other access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

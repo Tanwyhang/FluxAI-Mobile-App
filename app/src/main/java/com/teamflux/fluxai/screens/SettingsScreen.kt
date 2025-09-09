@@ -1,6 +1,8 @@
 package com.teamflux.fluxai.screens
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -13,16 +15,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.teamflux.fluxai.viewmodel.ThemeViewModel
+import com.teamflux.fluxai.viewmodel.UserViewModel
 
 @Composable
-fun SettingsScreen(themeViewModel: ThemeViewModel) {
+fun SettingsScreen(
+    themeViewModel: ThemeViewModel,
+    onSignOut: () -> Unit = {},
+    userViewModel: UserViewModel = viewModel()
+) {
     val isDarkTheme by themeViewModel.isDarkTheme.collectAsStateWithLifecycle()
+    val profileState by userViewModel.uiState.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
+            .verticalScroll(rememberScrollState()) // Add scrolling
     ) {
         Text(
             text = "Settings",
@@ -68,10 +78,32 @@ fun SettingsScreen(themeViewModel: ThemeViewModel) {
                     color = MaterialTheme.colorScheme.outline
                 )
 
-                ProfileInfoRow("Username", "john_doe_dev")
-                ProfileInfoRow("Email", "john.doe@teamflux.com")
-                ProfileInfoRow("Phone", "+1 (555) 123-4567")
-                ProfileInfoRow("GitHub", "github.com/johndoe")
+                // Use Firestore-backed profile data
+                val profile = profileState.profile
+                val username = profile?.githubUsername ?: profile?.displayName ?: "-"
+                val email = profile?.email ?: "-"
+                val github = profile?.githubProfileUrl
+                    ?: profile?.githubUsername?.let { "https://github.com/$it" }
+                    ?: "-"
+
+                if (profileState.isLoading) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    }
+                } else {
+                    ProfileInfoRow("Username", username)
+                    ProfileInfoRow("Email", email)
+                    ProfileInfoRow("GitHub", github)
+
+                    profileState.error?.let { err ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = err,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
             }
         }
 
@@ -129,47 +161,12 @@ fun SettingsScreen(themeViewModel: ThemeViewModel) {
             }
         }
 
-        // App Settings Card
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp), // Flat design
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Settings,
-                        contentDescription = "Settings",
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Text(
-                        text = "App Settings",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 18.sp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-
-                SettingsItem("Notifications", "Enabled", Icons.Default.Notifications)
-                SettingsItem("Privacy", "View Settings", Icons.Default.Lock)
-                SettingsItem("About", "Version 1.0.0", Icons.Default.Info)
-            }
-        }
+        // Add spacer before sign out button for better spacing
+        Spacer(modifier = Modifier.height(24.dp))
 
         // Sign Out Button
         Button(
-            onClick = { /* Handle sign out */ },
+            onClick = { onSignOut() },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
@@ -185,9 +182,13 @@ fun SettingsScreen(themeViewModel: ThemeViewModel) {
             Text(
                 text = "Sign Out",
                 fontSize = 16.sp,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onError
             )
         }
+
+        // Add bottom padding to ensure button is above navigation bar
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
