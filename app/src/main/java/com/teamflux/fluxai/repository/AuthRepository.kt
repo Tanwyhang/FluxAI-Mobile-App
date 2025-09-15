@@ -1,20 +1,26 @@
 package com.teamflux.fluxai.repository
 
 import android.app.Activity
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.OAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
 import com.teamflux.fluxai.model.Admin
 import com.teamflux.fluxai.model.TeamMember
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.tasks.await
+import java.net.UnknownHostException
 import kotlin.coroutines.resume
+import com.google.firebase.FirebaseNetworkException
+import android.util.Log
+import java.util.Date
+import java.util.UUID
 
 class AuthRepository {
     private val auth = FirebaseAuth.getInstance()
@@ -22,24 +28,88 @@ class AuthRepository {
     private val repositoryScope = CoroutineScope(Dispatchers.IO)
 
     init {
-        // Set explicit language for Firebase Auth to avoid locale warnings
-        auth.setLanguageCode("en") // or use Locale.getDefault().language
+        auth.setLanguageCode("en")
     }
 
     val currentUser: FirebaseUser? get() = auth.currentUser
 
+    private fun isPlayServicesUpToDate(activity: Activity): Boolean {
+        return try {
+            val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+            val status = availability.isGooglePlayServicesAvailable(activity)
+            Log.d("AuthRepository", "Google Play Services status: $status")
+
+            when (status) {
+                com.google.android.gms.common.ConnectionResult.SUCCESS -> true
+                com.google.android.gms.common.ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED -> {
+                    Log.e("AuthRepository", "Google Play Services needs update. Status=$status")
+                    false
+                }
+                com.google.android.gms.common.ConnectionResult.SERVICE_MISSING -> {
+                    Log.e("AuthRepository", "Google Play Services is missing. Status=$status")
+                    false
+                }
+                com.google.android.gms.common.ConnectionResult.SERVICE_DISABLED -> {
+                    Log.e("AuthRepository", "Google Play Services is disabled. Status=$status")
+                    false
+                }
+                else -> {
+                    Log.e("AuthRepository", "Google Play Services error. Status=$status")
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("AuthRepository", "Failed to check Play Services status", e)
+            true // Don't block sign-in if check fails
+        }
+    }
+
+    private fun classifyAuthError(exception: Exception): Exception {
+        fun Throwable.causeChain(): Sequence<Throwable> = generateSequence(this) { it.cause }
+        val chain = exception.causeChain().toList()
+        val isNetwork = chain.any {
+            it is FirebaseNetworkException || it is UnknownHostException ||
+                    it.message?.contains("Unable to resolve host", ignoreCase = true) == true ||
+                    it.message?.contains("Failed to connect", ignoreCase = true) == true
+        }
+
+        return when {
+            !isNetwork && exception.message?.contains("INTERNAL") == true ->
+                Exception("Internal auth error. Please retry.")
+            isNetwork ->
+                Exception("Network issue. Check internet connection / DNS and try again.")
+            exception.message?.contains("CANCELED") == true ->
+                Exception("Authentication cancelled.")
+            exception.message?.contains("SIGN_IN_CURRENTLY_IN_PROGRESS") == true ->
+                Exception("Sign-in already in progress. Please wait.")
+            exception.message?.contains("INVALID_PROVIDER_ID") == true ->
+                Exception("GitHub provider misconfigured in Firebase Console.")
+            exception.message?.contains("redirect_uri_mismatch") == true ->
+                Exception("Redirect URI mismatch. Verify Firebase auth domain & GitHub OAuth callback.")
+            exception.message?.contains("WEB_NETWORK_REQUEST_FAILED") == true ->
+                Exception("Web network request failed. Check connectivity.")
+            exception.message?.contains("WEB_INTERNAL_ERROR") == true ->
+                Exception("Web internal error. Please retry.")
+            else ->
+                Exception("GitHub authentication failed: ${exception.message}")
+        }
+    }
+
     suspend fun signInWithGitHub(activity: Activity): Result<FirebaseUser> {
         return try {
-            // First check if there's a pending result (critical for activity lifecycle)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                if (!isPlayServicesUpToDate(activity)) {
+                    return Result.failure(Exception("Google Play Services outdated. Update it in the emulator/device and retry."))
+                }
+            }
+
             val pendingResultTask = auth.pendingAuthResult
             if (pendingResultTask != null) {
-                android.util.Log.d("AuthRepository", "Found pending GitHub auth result")
-                // There's something already here! Finish the sign-in for your user.
+                Log.d("AuthRepository", "Found pending GitHub auth result")
                 return suspendCancellableCoroutine { continuation ->
                     pendingResultTask
                         .addOnSuccessListener { authResult ->
-                            android.util.Log.d("AuthRepository", "GitHub pending auth successful for user: ${authResult.user?.email}")
-                            // Store GitHub data and request Firestore permissions in background
+                            Log.d("AuthRepository", "GitHub pending auth successful for user: ${authResult.user?.email}")
                             repositoryScope.launch {
                                 storeGitHubUserData(authResult)
                                 requestFirestorePermissions(authResult.user!!)
@@ -47,75 +117,36 @@ class AuthRepository {
                             continuation.resume(Result.success(authResult.user!!))
                         }
                         .addOnFailureListener { exception ->
-                            android.util.Log.e("AuthRepository", "GitHub pending auth failed", exception)
-                            continuation.resume(Result.failure(exception))
+                            Log.e("AuthRepository", "GitHub pending auth failed", exception)
+                            continuation.resume(Result.failure(classifyAuthError(exception as Exception)))
                         }
                 }
             }
 
-            // No pending result, start new sign-in flow
             val provider = OAuthProvider.newBuilder("github.com")
                 .setScopes(listOf("user:email", "read:user", "repo"))
-                .addCustomParameters(mapOf(
-                    "allow_signup" to "true"
-                ))
+                .addCustomParameters(mapOf("allow_signup" to "true"))
                 .build()
 
-            android.util.Log.d("AuthRepository", "Starting GitHub OAuth flow")
-
-            // Use callback-based approach to handle activity lifecycle properly
+            Log.d("AuthRepository", "Starting GitHub OAuth flow")
             suspendCancellableCoroutine { continuation ->
                 auth.startActivityForSignInWithProvider(activity, provider)
                     .addOnSuccessListener { authResult ->
-                        android.util.Log.d("AuthRepository", "GitHub sign-in successful for user: ${authResult.user?.email}")
-
-                        // Store GitHub user data and request Firestore permissions in background
+                        Log.d("AuthRepository", "GitHub sign-in successful for user: ${authResult.user?.email}")
                         repositoryScope.launch {
                             storeGitHubUserData(authResult)
                             requestFirestorePermissions(authResult.user!!)
                         }
-
                         continuation.resume(Result.success(authResult.user!!))
                     }
                     .addOnFailureListener { exception ->
-                        android.util.Log.e("AuthRepository", "GitHub sign-in failed", exception)
-
-                        val friendlyError = when {
-                            exception.message?.contains("CANCELED") == true -> {
-                                Exception("Authentication was cancelled")
-                            }
-                            exception.message?.contains("NETWORK_ERROR") == true -> {
-                                Exception("Network error. Please check your connection and try again.")
-                            }
-                            exception.message?.contains("SIGN_IN_CURRENTLY_IN_PROGRESS") == true -> {
-                                Exception("Sign-in already in progress. Please wait.")
-                            }
-                            exception.message?.contains("INVALID_PROVIDER_ID") == true -> {
-                                Exception("GitHub provider not configured properly. Please check Firebase setup.")
-                            }
-                            exception.message?.contains("WEB_CONTEXT_CANCELED") == true -> {
-                                Exception("Authentication was cancelled by user")
-                            }
-                            exception.message?.contains("WEB_NETWORK_REQUEST_FAILED") == true -> {
-                                Exception("Network request failed. Please check your internet connection.")
-                            }
-                            exception.message?.contains("WEB_INTERNAL_ERROR") == true -> {
-                                Exception("Internal error occurred. Please try again.")
-                            }
-                            exception.message?.contains("redirect_uri_mismatch") == true -> {
-                                Exception("OAuth redirect configuration error. Please check Firebase and GitHub settings.")
-                            }
-                            else -> {
-                                Exception("GitHub authentication failed: ${exception.message}")
-                            }
-                        }
-
-                        continuation.resume(Result.failure(friendlyError))
+                        Log.e("AuthRepository", "GitHub sign-in failed", exception)
+                        continuation.resume(Result.failure(classifyAuthError(exception as Exception)))
                     }
             }
         } catch (e: Exception) {
-            android.util.Log.e("AuthRepository", "GitHub sign-in setup failed", e)
-            Result.failure(e)
+            Log.e("AuthRepository", "GitHub sign-in setup failed", e)
+            Result.failure(classifyAuthError(e))
         }
     }
 
@@ -126,11 +157,7 @@ class AuthRepository {
 
             // Extract GitHub-specific data from AdditionalUserInfo
             val githubUsername = additionalUserInfo?.username
-            val githubProfileUrl = if (githubUsername != null) {
-                "https://github.com/$githubUsername"
-            } else {
-                null
-            }
+            val githubProfileUrl = githubUsername?.let { "https://github.com/$it" }
 
             // Get profile data from additionalUserInfo
             val profileData = additionalUserInfo?.profile
@@ -168,16 +195,15 @@ class AuthRepository {
                 .set(githubData, com.google.firebase.firestore.SetOptions.merge())
                 .await()
 
-            android.util.Log.d("AuthRepository", "Stored GitHub user data for ${user.email} with username: $githubUsername")
+            Log.d("AuthRepository", "Stored GitHub user data for ${user.email} with username: $githubUsername")
         } catch (e: Exception) {
-            android.util.Log.w("AuthRepository", "Failed to store GitHub user data", e)
+            Log.w("AuthRepository", "Failed to store GitHub user data", e)
             // Don't fail the entire auth process if this fails
         }
     }
 
     private suspend fun requestFirestorePermissions(user: FirebaseUser) {
         try {
-            // Test write permission by attempting to update user document
             val testData = mapOf(
                 "permissionTest" to System.currentTimeMillis(),
                 "firestoreWritePermission" to "granted"
@@ -187,10 +213,9 @@ class AuthRepository {
                 .update(testData)
                 .await()
 
-            android.util.Log.d("AuthRepository", "Firestore write permission confirmed for user: ${user.uid}")
+            Log.d("AuthRepository", "Firestore write permission confirmed for user: ${user.uid}")
         } catch (e: Exception) {
-            android.util.Log.e("AuthRepository", "Firestore permission test failed for user: ${user.uid}", e)
-            // This will help debug permission issues
+            Log.e("AuthRepository", "Firestore permission test failed for user: ${user.uid}", e)
             throw Exception("Firestore write permission denied. Please check security rules.", e)
         }
     }
@@ -202,7 +227,6 @@ class AuthRepository {
         phone: String
     ): Result<Unit> {
         return try {
-            // Get existing GitHub data from users collection
             val userDoc = firestore.collection("users").document(userId).get().await()
             val githubData = userDoc.data ?: emptyMap()
 
@@ -213,24 +237,22 @@ class AuthRepository {
                 phone = phone
             )
 
-            // Store admin profile WITHOUT username/phone
             val adminData = mutableMapOf<String, Any?>()
-            adminData.putAll(admin.toMap()) // now only adminId + email
-            adminData["githubUsername"] = githubData["githubUsername"]
-            adminData["avatarUrl"] = githubData["avatarUrl"]
+            adminData.putAll(admin.toMap())
+            githubData["githubUsername"]?.let { adminData["githubUsername"] = it }
+            githubData["avatarUrl"]?.let { adminData["avatarUrl"] = it }
             adminData["createdAt"] = System.currentTimeMillis()
 
             firestore.collection("admins").document(userId).set(adminData).await()
 
-            // Update user document with role
             firestore.collection("users").document(userId)
                 .update("role", "admin")
                 .await()
 
-            android.util.Log.d("AuthRepository", "Admin profile created successfully for user: $userId")
+            Log.d("AuthRepository", "Admin profile created successfully for user: $userId")
             Result.success(Unit)
         } catch (e: Exception) {
-            android.util.Log.e("AuthRepository", "Failed to create admin profile for user: $userId", e)
+            Log.e("AuthRepository", "Failed to create admin profile for user: $userId", e)
             Result.failure(e)
         }
     }
@@ -244,22 +266,19 @@ class AuthRepository {
         phone: String
     ): Result<Unit> {
         return try {
-            println("AuthRepository: Creating team member profile for userId: $userId, teamId: $teamId")
+            Log.d("AuthRepository", "Creating team member profile for userId: $userId, teamId: $teamId")
 
-            // Get existing GitHub data from users collection
             val userDoc = firestore.collection("users").document(userId).get().await()
             val githubData = userDoc.data ?: emptyMap()
             val githubUsername = githubData["githubUsername"] as? String ?: ""
 
-            println("AuthRepository: Found GitHub username: $githubUsername")
+            Log.d("AuthRepository", "Found GitHub username: $githubUsername")
 
-            // Generate a unique member ID for the document
-            val memberId = java.util.UUID.randomUUID().toString()
+            val memberId = UUID.randomUUID().toString()
 
-            // Create team member data with all required fields
             val memberData = mapOf(
                 "memberId" to memberId,
-                "userId" to userId,  // Store userId as a field, not document ID
+                "userId" to userId,
                 "teamId" to teamId,
                 "githubUsername" to githubUsername,
                 "role" to role,
@@ -267,17 +286,15 @@ class AuthRepository {
                 "phone" to phone,
                 "githubProfileLink" to githubProfileLink,
                 "avatarUrl" to (githubData["avatarUrl"] ?: ""),
-                "status" to "active",  // Important: set status to active
-                "createdAt" to java.util.Date(),
-                "addedBy" to userId  // Self-joined
+                "status" to "active",
+                "createdAt" to Date(),
+                "addedBy" to userId
             )
 
-            // Store with generated memberId as document ID (not userId)
             firestore.collection("teamMembers").document(memberId).set(memberData).await()
 
-            println("AuthRepository: Team member document created with ID: $memberId")
+            Log.d("AuthRepository", "Team member document created with ID: $memberId")
 
-            // Update user document with role and teamId
             firestore.collection("users").document(userId)
                 .update(mapOf(
                     "role" to "team_member",
@@ -285,40 +302,39 @@ class AuthRepository {
                 ))
                 .await()
 
-            println("AuthRepository: User document updated with team information")
-            android.util.Log.d("AuthRepository", "Team member profile created successfully for user: $userId")
+            Log.d("AuthRepository", "User document updated with team information")
+            Log.d("AuthRepository", "Team member profile created successfully for user: $userId")
             Result.success(Unit)
         } catch (e: Exception) {
-            println("AuthRepository: Error creating team member profile: ${e.message}")
-            android.util.Log.e("AuthRepository", "Failed to create team member profile for user: $userId", e)
+            Log.e("AuthRepository", "Failed to create team member profile for user: $userId", e)
             Result.failure(e)
         }
     }
 
     suspend fun getUserRole(userId: String): String? {
         return try {
-            // First check user document for role
             val userDoc = firestore.collection("users").document(userId).get().await()
             val role = userDoc.getString("role")
             if (role != null) {
                 return role
             }
 
-            // Fallback: Check if user is admin
             val adminDoc = firestore.collection("admins").document(userId).get().await()
             if (adminDoc.exists()) {
                 return "admin"
             }
 
-            // Check if user is team member
-            val memberDoc = firestore.collection("teamMembers").document(userId).get().await()
-            if (memberDoc.exists()) {
+            val memberDocs = firestore.collection("teamMembers")
+                .whereEqualTo("userId", userId)
+                .get()
+                .await()
+            if (memberDocs.documents.isNotEmpty()) {
                 return "team_member"
             }
 
             null
         } catch (e: Exception) {
-            android.util.Log.e("AuthRepository", "Failed to get user role for: $userId", e)
+            Log.e("AuthRepository", "Failed to get user role for: $userId", e)
             null
         }
     }
@@ -327,90 +343,70 @@ class AuthRepository {
         return try {
             val roles = mutableListOf<String>()
 
-            // Check if user is an admin
             val adminDoc = firestore.collection("admins").document(userId).get().await()
             if (adminDoc.exists()) {
                 roles.add("admin")
             }
 
-            // Check if user is a team member
-            val teamMemberDoc = firestore.collection("teamMembers").document(userId).get().await()
-            if (teamMemberDoc.exists()) {
+            val memberDocs = firestore.collection("teamMembers")
+                .whereEqualTo("userId", userId)
+                .get()
+                .await()
+            if (memberDocs.documents.isNotEmpty()) {
                 roles.add("team_member")
             }
 
-            android.util.Log.d("AuthRepository", "User $userId has roles: $roles")
+            Log.d("AuthRepository", "User $userId has roles: $roles")
             roles
         } catch (e: Exception) {
-            android.util.Log.e("AuthRepository", "Failed to get user roles for $userId", e)
+            Log.e("AuthRepository", "Failed to get user roles for $userId", e)
             emptyList()
         }
     }
 
     suspend fun signInWithDifferentGitHubAccount(activity: Activity): Result<FirebaseUser> {
         return try {
-            // First sign out to clear any existing session
             auth.signOut()
+            Log.d("AuthRepository", "Clearing pending auth result for fresh login")
 
-            // Clear any pending auth results to ensure fresh flow
-            auth.pendingAuthResult?.let { pendingTask ->
-                // Cancel any pending operations if possible
-                android.util.Log.d("AuthRepository", "Clearing pending auth result for fresh login")
+            if (!isPlayServicesUpToDate(activity)) {
+                return Result.failure(Exception("Google Play Services outdated. Update it and retry."))
             }
 
-            // Force a fresh authentication by adding prompt parameter
             val provider = OAuthProvider.newBuilder("github.com")
                 .setScopes(listOf("user:email", "read:user", "repo"))
                 .addCustomParameters(mapOf(
                     "allow_signup" to "true",
-                    "prompt" to "select_account", // Force account selection
-                    "login_hint" to "", // Clear any login hints
+                    "prompt" to "select_account",
+                    "login_hint" to ""
                 ))
                 .build()
 
-            android.util.Log.d("AuthRepository", "Starting fresh GitHub OAuth flow with account selection")
-
+            Log.d("AuthRepository", "Starting fresh GitHub OAuth flow with account selection")
             suspendCancellableCoroutine { continuation ->
                 auth.startActivityForSignInWithProvider(activity, provider)
                     .addOnSuccessListener { authResult ->
-                        android.util.Log.d("AuthRepository", "Fresh GitHub sign-in successful for user: ${authResult.user?.email}")
-
-                        // Store GitHub user data and request Firestore permissions in background
+                        Log.d("AuthRepository", "Fresh GitHub sign-in successful for user: ${authResult.user?.email}")
                         repositoryScope.launch {
                             storeGitHubUserData(authResult)
                             requestFirestorePermissions(authResult.user!!)
                         }
-
                         continuation.resume(Result.success(authResult.user!!))
                     }
                     .addOnFailureListener { exception ->
-                        android.util.Log.e("AuthRepository", "Fresh GitHub sign-in failed", exception)
-
-                        val friendlyError = when {
-                            exception.message?.contains("CANCELED") == true -> {
-                                Exception("Authentication was cancelled")
-                            }
-                            exception.message?.contains("NETWORK_ERROR") == true -> {
-                                Exception("Network error. Please check your connection and try again.")
-                            }
-                            else -> {
-                                Exception("GitHub authentication failed: ${exception.message}")
-                            }
-                        }
-
-                        continuation.resume(Result.failure(friendlyError))
+                        Log.e("AuthRepository", "Fresh GitHub sign-in failed", exception)
+                        continuation.resume(Result.failure(classifyAuthError(exception as Exception)))
                     }
             }
         } catch (e: Exception) {
-            android.util.Log.e("AuthRepository", "Fresh GitHub sign-in setup failed", e)
-            Result.failure(e)
+            Log.e("AuthRepository", "Fresh GitHub sign-in setup failed", e)
+            Result.failure(classifyAuthError(e))
         }
     }
 
     fun clearAuthState() {
-        // Clear Firebase Auth state completely
         auth.signOut()
-        android.util.Log.d("AuthRepository", "Auth state cleared for account switching")
+        Log.d("AuthRepository", "Auth state cleared for account switching")
     }
 
     fun signOut() {
@@ -421,7 +417,6 @@ class AuthRepository {
 // Extension function to convert data classes to Map
 private fun Admin.toMap(): Map<String, Any?> = mapOf(
     "adminId" to adminId,
-    // remove username and phone storage per requirement
     "email" to email
 )
 

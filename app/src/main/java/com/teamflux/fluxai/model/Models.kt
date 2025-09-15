@@ -32,37 +32,18 @@ data class Attendance(
     val attendanceId: String,
     val userId: String,
     val date: Date,
-    val status: String // "present", "absent", "late"
-)
-
-// --- PERFORMANCE ---
-data class Performance(
-    val performanceId: String,
-    val userId: String,
-    val teamId: String, // for team performance
-    val commits: Int,
-    val performanceScore: Float,
-    val startDate: Date,
-    val endDate: Date
+    val status: String // "present", "absent"
 )
 
 // --- UI MODELS FOR DASHBOARD ---
 data class EmployeePerformance(
-    val id: String,
-    val name: String,
-    val role: String,
-    val githubUsername: String,
-    val commitsThisWeek: Int,
-    val commitsLastWeek: Int,
-    val linesOfCode: Int,
-    val tasksCompleted: Int,
-    val totalTasks: Int,
-    val attendanceRate: Double,
-    val codeQualityScore: Double,
-    val collaborationScore: Double,
-    val productivityScore: Double,
-    val commitHistory: List<Int>, // Last 7 days commit count
-    val aiEvaluation: AIEvaluation
+    val id: String, // Unique employee ID
+    val githubUsername: String, // GitHub username
+    val commits: Int, // Total commits in the timeframe (e.g., 30 days)
+    val attendanceRate: Double, // Attendance rate (0.0 to 1.0)
+    val collaborationScore: Double, // Collaboration score (0.0 to 10.0)
+    val productivityScore: Double, // Productivity score (0.0 to 10.0)
+    val aiEvaluation: AIEvaluation? = null // AI-generated evaluation (nullable
 )
 
 data class AIEvaluation(

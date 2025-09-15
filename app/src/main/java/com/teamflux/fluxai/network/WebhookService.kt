@@ -2,20 +2,17 @@ package com.teamflux.fluxai.network
 
 import android.content.Context
 import android.os.Build
-import androidx.annotation.RequiresApi
-import com.teamflux.fluxai.data.DatabaseProvider
-import com.teamflux.fluxai.data.room.AIInsightDao
-import com.teamflux.fluxai.data.room.AIInsightEntity
-import com.teamflux.fluxai.data.room.EmployeePerformanceDao
-import com.teamflux.fluxai.data.room.CommitDataEntity
+import android.util.Log
 import com.teamflux.fluxai.model.AIEvaluation
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.random.Random
@@ -24,13 +21,6 @@ import kotlin.random.Random
 @Serializable
 data class N8nEmployeePerformanceRequest(
     val username: String
-)
-
-@Serializable
-data class N8nTeamInsightsRequest(
-    val teamName: String,
-    val memberCount: Int,
-    val recentPerformanceData: Map<String, String> = emptyMap()
 )
 
 @Serializable
@@ -52,21 +42,23 @@ data class AIEvaluationResponse(
 
 @Serializable
 data class CommitDataResponse(
-    val commitDates: List<String>  // List of commit dates from the last 30 days
+    val commitDates: List<String> // List of commit dates from the last 30 days
+)
+
+// Placeholder for EmployeeMetrics (since it was not provided)
+@Serializable
+data class CombinedEmployeePayload(
+    val output: AIEvaluationResponse? = null, // nested AI evaluation
+    val date: List<String>? = null,          // alternative commit date field
 )
 
 class WebhookService(context: Context) {
-    private val database = DatabaseProvider.getDatabase(context)
-    private val aiInsightDao: AIInsightDao = database.aiInsightDao()
-    private val employeePerformanceDao: EmployeePerformanceDao = database.employeePerformanceDao()
-
     companion object {
         // N8n webhook endpoints
-        private const val BASE_N8N_URL = "https://your-n8n-instance.com/webhook"
-        private const val EMPLOYEE_PERFORMANCE_ENDPOINT = "$BASE_N8N_URL/commit-performance"
-        private const val TEAM_INSIGHTS_ENDPOINT = "$BASE_N8N_URL/team-insights"
-        private const val ADMIN_CHAT_ENDPOINT = "$BASE_N8N_URL/admin-chat"
-        private const val EMPLOYEE_CHAT_ENDPOINT = "$BASE_N8N_URL/employee-chat"
+        private const val EMPLOYEE_PERFORMANCE_ENDPOINT = "http://10.0.2.2:5678/webhook/commit-performance"
+        private const val TEAM_INSIGHTS_ENDPOINT = "http://10.0.2.2:5678/webhook/team-insights"
+        private const val ADMIN_CHAT_ENDPOINT = "http://10.0.2.2:5678/webhook/admin-chat"
+        private const val EMPLOYEE_CHAT_ENDPOINT = "http://10.0.2.2:5678/webhook/employee-chat"
 
         // Configuration
         private const val USE_WEBHOOKS = true
@@ -79,6 +71,7 @@ class WebhookService(context: Context) {
         }
     }
 
+    // ===== Public API (no persistence) =====
     suspend fun evaluateEmployeePerformanceByUsername(githubUsername: String): AIEvaluationResponse {
         return withContext(Dispatchers.IO) {
             if (USE_WEBHOOKS) {
@@ -88,8 +81,26 @@ class WebhookService(context: Context) {
 
                     val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, json.encodeToString(request))
                     if (response != null) {
-                        logDebug("N8n response received successfully")
-                        return@withContext json.decodeFromString<AIEvaluationResponse>(response)
+                        logDebug("Raw evaluation response: ${response.take(300)}")
+                        // Try direct decode first
+                        val direct = runCatching { json.decodeFromString<AIEvaluationResponse>(response) }.getOrNull()
+                        if (direct != null && direct.overallRating.isNotBlank()) {
+                            return@withContext direct
+                        }
+                        // Try combined wrapper
+                        val combined = runCatching { json.decodeFromString<CombinedEmployeePayload>(response) }.getOrNull()
+                        if (combined?.output != null) {
+                            return@withContext combined.output
+                        }
+                        // Last resort: attempt manual JSON unwrap if structure unknown
+                        val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
+                        if (root is JsonObject && "output" in root) {
+                            val outElem = root["output"]
+                            if (outElem != null) {
+                                val outEval = runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), outElem) }.getOrNull()
+                                if (outEval != null) return@withContext outEval
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     logError("N8n employee evaluation failed", e)
@@ -103,18 +114,16 @@ class WebhookService(context: Context) {
         return withContext(Dispatchers.IO) {
             if (USE_WEBHOOKS) {
                 try {
-                    val request = N8nTeamInsightsRequest(
-                        teamName = teamName,
-                        memberCount = memberCount,
-                        recentPerformanceData = mapOf(
-                            "roles" to teamRoles.joinToString(","),
-                            "team_size" to memberCount.toString(),
-                            "team_name" to teamName
-                        )
-                    )
+                    // Build JSON payload manually to avoid requiring a generated serializer for the request class
+                    val payload = JSONObject().apply {
+                        put("teamName", teamName)
+                        put("memberCount", memberCount)
+                        put("roles", teamRoles.joinToString(","))
+                    }.toString()
+
                     logDebug("=== N8N TEAM INSIGHTS GENERATION ===\nTeam: $teamName, Members: $memberCount\nRoles: ${teamRoles.joinToString(", ")}\nEndpoint: $TEAM_INSIGHTS_ENDPOINT")
 
-                    val response = sendWebhookRequest(TEAM_INSIGHTS_ENDPOINT, json.encodeToString(request))
+                    val response = sendWebhookRequest(TEAM_INSIGHTS_ENDPOINT, payload)
                     if (response != null) {
                         logDebug("N8n team insights received successfully")
                         return@withContext json.decodeFromString<List<String>>(response)
@@ -150,55 +159,79 @@ class WebhookService(context: Context) {
         }
     }
 
+    suspend fun getEmployeeChatResponse(
+        message: String,
+        username: String = "",
+        context: Map<String, String> = emptyMap()
+    ): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val request = N8nChatRequest(
+                    message = message,
+                    username = username,
+                    context = context + mapOf("userType" to "Employee")
+                )
+                logDebug("=== N8N EMPLOYEE CHAT ===\nUsername: $username\nMessage: $message\nEndpoint: $EMPLOYEE_CHAT_ENDPOINT")
+
+                val response = sendWebhookRequest(EMPLOYEE_CHAT_ENDPOINT, json.encodeToString(request))
+                if (response != null) {
+                    logDebug("N8n employee chat response received")
+                    return@withContext cleanTextResponse(response)
+                }
+
+                throw IllegalStateException("Employee chat webhook did not return a response")
+            } catch (e: Exception) {
+                logError("N8n employee chat failed", e)
+                throw e
+            }
+        }
+    }
+
     suspend fun fetchCommitData(
-        teamId: String = "",
-        employeeId: String = "",
+        githubUsername: String,
         timeframe: String = "7days",
         forceRefresh: Boolean = false
     ): CommitDataResponse {
         return withContext(Dispatchers.IO) {
-            if (USE_WEBHOOKS || forceRefresh) {
+            if (USE_WEBHOOKS) {
                 try {
                     val request = mapOf(
-                        "employeeId" to employeeId,
-                        "teamId" to teamId,
+                        "githubUsername" to githubUsername,
                         "timeframe" to timeframe,
                         "forceRefresh" to forceRefresh.toString()
                     )
-                    logDebug("=== N8N COMMIT DATA FETCH ===\nEmployee: $employeeId\nTeam: $teamId\nTimeframe: $timeframe\nForce Refresh: $forceRefresh")
+                    logDebug("=== N8N COMMIT DATA FETCH ===\nEmployee: $githubUsername\nTimeframe: $timeframe\nForce Refresh: $forceRefresh")
 
-                    val response = sendWebhookRequest("$BASE_N8N_URL/commit-data", json.encodeToString(request))
+                    val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, json.encodeToString(request))
                     if (response != null) {
-                        val commitData = json.decodeFromString<CommitDataResponse>(response)
-                        // Cache the commit data
-                        employeePerformanceDao.insertCommitData(CommitDataEntity(
-                            employeeId = employeeId,
-                            commitDates = commitData.commitDates,
-                            timestamp = System.currentTimeMillis()
-                        ))
-                        return@withContext commitData
+                        logDebug("Raw commit response: ${response.take(300)}")
+                        // Try direct expected structure
+                        val direct = runCatching { json.decodeFromString<CommitDataResponse>(response) }.getOrNull()
+                        if (direct != null) return@withContext direct
+                        // Try combined wrapper with alternative field names
+                        val combined = runCatching { json.decodeFromString<CombinedEmployeePayload>(response) }.getOrNull()
+                        if (combined != null) {
+                            val dates = when {
+                                !combined.date.isNullOrEmpty() -> combined.date
+                                else -> emptyList()
+                            }
+                            if (dates.isNotEmpty()) return@withContext CommitDataResponse(dates)
+                        }
+                        // Manual JSON parse fallback
+                        val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
+                        if (root is JsonObject) {
+                            val dates = when {
+                                root["date"] != null -> root["date"]!!.jsonArray.map { it.jsonPrimitive.content }
+                                else -> emptyList()
+                            }
+                            if (dates.isNotEmpty()) return@withContext CommitDataResponse(dates)
+                        }
                     }
                 } catch (e: Exception) {
                     logError("N8n commit data fetch failed", e)
                 }
             }
-
-            // Try to get cached data if not forcing refresh or if webhook failed
-            if (!forceRefresh) {
-                try {
-                    val cachedData = employeePerformanceDao.getCommitData(employeeId)
-                    if (cachedData != null) {
-                        return@withContext CommitDataResponse(
-                            commitDates = cachedData.commitDates
-                        )
-                    }
-                } catch (e: Exception) {
-                    logError("Failed to retrieve cached commit data", e)
-                }
-            }
-
-            // If force refresh failed or no cached data, return fallback
-            generateCommitDataFallback(employeeId.ifEmpty { "default" })
+            generateCommitDataFallback(githubUsername)
         }
     }
 
@@ -206,34 +239,21 @@ class WebhookService(context: Context) {
         return withContext(Dispatchers.IO) {
             try {
                 val aiResponse = evaluateEmployeePerformanceByUsername(metrics.githubUsername)
-                val evaluation = AIEvaluation(
+                AIEvaluation(
                     overallRating = aiResponse.overallRating,
                     strengths = aiResponse.strengths,
                     improvements = aiResponse.improvements,
                     recommendation = aiResponse.recommendation,
                     performanceTrend = aiResponse.performanceTrend
                 )
-                // Save to Room
-                val entity = evaluation.toEntity(metrics.employeeId)
-                aiInsightDao.insertAIInsight(entity)
-                evaluation
             } catch (e: Exception) {
                 logError("Employee performance evaluation failed", e)
-
-                // Try cached evaluation
-                val cachedEvaluation = try {
-                    aiInsightDao.getAIInsight(metrics.employeeId)
-                        .catch { emit(null) }
-                        .firstOrNull()
-                } catch (_: Exception) {
-                    null
-                }
-
-                cachedEvaluation?.toAIEvaluation() ?: generateFallbackEvaluationFromMetrics(metrics)
+                generateFallbackEvaluationFromMetrics(metrics)
             }
         }
     }
 
+    // ===== Networking =====
     private fun sendWebhookRequest(url: String, payload: String): String? {
         return try {
             logDebug("Sending request to: $url\nPayload size: ${payload.length} characters")
@@ -283,11 +303,7 @@ class WebhookService(context: Context) {
         }
     }
 
-    // === Fallback generators and helpers (unchanged from your version) ===
-    // generateEmployeeFallbackEvaluation, generateTeamFallbackInsights,
-    // generateAdminFallbackResponse, generateEmployeeFallbackResponse,
-    // extensions toEntity(), toAIEvaluation(), logDebug(), logError()
-
+    // ===== Fallback Generators =====
     private fun generateEmployeeFallbackEvaluation(githubUsername: String): AIEvaluationResponse {
         logDebug("Generating fallback evaluation for: $githubUsername")
         val random = Random(githubUsername.hashCode())
@@ -388,6 +404,7 @@ class WebhookService(context: Context) {
         }
     }
 
+    // Note: This method was defined but not used; included here for completeness
     private fun generateEmployeeFallbackResponse(message: String, githubUsername: String, context: Map<String, String>): String {
         val lowercaseMessage = message.lowercase()
         return when {
@@ -408,20 +425,19 @@ class WebhookService(context: Context) {
         val random = Random(employeeId.hashCode())
         val today = System.currentTimeMillis()
         val oneDay = 24 * 60 * 60 * 1000L
-        return CommitDataResponse(
-            commitDates = (0..6).map { daysAgo ->
-                if (random.nextBoolean()) {
-                    val ts = today - (daysAgo * oneDay)
-                    if (Build.VERSION.SDK_INT >= 26) {
-                        java.time.Instant.ofEpochMilli(ts).toString()
-                    } else {
-                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
-                            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-                            .format(java.util.Date(ts))
-                    }
-                } else ""
-            }.filter { it.isNotEmpty() }
-        )
+        val dates = (0 until 14).mapNotNull { daysAgo ->
+            if (random.nextBoolean()) {
+                val ts = today - daysAgo * oneDay
+                if (Build.VERSION.SDK_INT >= 26) {
+                    java.time.Instant.ofEpochMilli(ts).toString()
+                } else {
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+                    fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    fmt.format(java.util.Date(ts))
+                }
+            } else null
+        }
+        return CommitDataResponse(dates)
     }
 
     private fun generateFallbackEvaluationFromMetrics(metrics: EmployeeMetrics): AIEvaluation {
@@ -437,12 +453,6 @@ class WebhookService(context: Context) {
 
         val strengths = mutableListOf<String>()
         val improvements = mutableListOf<String>()
-
-        if (metrics.codeQualityScore >= 8.0) {
-            strengths.add("High code quality standards maintained")
-        } else {
-            improvements.add("Focus on improving code quality and review practices")
-        }
 
         if (metrics.collaborationScore >= 8.0) {
             strengths.add("Excellent collaboration and teamwork")
@@ -478,30 +488,13 @@ class WebhookService(context: Context) {
         )
     }
 
-    private fun AIEvaluation.toEntity(employeeId: String) = AIInsightEntity(
-        employeeId = employeeId,
-        overallRating = overallRating,
-        strengths = strengths,
-        improvements = improvements,
-        recommendation = recommendation,
-        performanceTrend = performanceTrend
-    )
-
-    private fun AIInsightEntity.toAIEvaluation() = AIEvaluation(
-        overallRating = overallRating,
-        strengths = strengths,
-        improvements = improvements,
-        recommendation = recommendation,
-        performanceTrend = performanceTrend
-    )
-
     private fun logDebug(message: String) {
         if (DEBUG_WEBHOOKS) {
-            android.util.Log.d("WebhookService", message)
+            Log.d("WebhookService", message)
         }
     }
 
     private fun logError(message: String, throwable: Throwable? = null) {
-        android.util.Log.e("WebhookService", message, throwable)
+        Log.e("WebhookService", message, throwable)
     }
 }

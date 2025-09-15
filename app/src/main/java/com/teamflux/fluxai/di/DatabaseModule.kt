@@ -2,8 +2,9 @@ package com.teamflux.fluxai.di
 
 import android.content.Context
 import androidx.room.Room
-import com.teamflux.fluxai.data.local.FluxDatabase
-import com.teamflux.fluxai.data.local.dao.*
+import com.teamflux.fluxai.data.room.AIInsightDao
+import com.teamflux.fluxai.data.room.EmployeePerformanceDao
+import com.teamflux.fluxai.data.room.FluxDatabase
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -14,34 +15,20 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
+
     @Provides
     @Singleton
-    fun provideDatabase(@ApplicationContext context: Context): FluxDatabase {
-        return Room.databaseBuilder(
+    fun provideDatabase(@ApplicationContext context: Context): FluxDatabase =
+        Room.databaseBuilder(
             context,
             FluxDatabase::class.java,
-            "flux_database"
-        ).build()
-    }
+            FluxDatabase.DATABASE_NAME
+        ).addMigrations(FluxDatabase.MIGRATION_1_2).build()
 
     @Provides
-    fun provideAdminDao(database: FluxDatabase): AdminDao = database.adminDao()
+    fun provideEmployeePerformanceDao(db: FluxDatabase): EmployeePerformanceDao = db.employeePerformanceDao()
 
     @Provides
-    fun provideTeamDao(database: FluxDatabase): TeamDao = database.teamDao()
-
-    @Provides
-    fun provideTeamMemberDao(database: FluxDatabase): TeamMemberDao = database.teamMemberDao()
-
-    @Provides
-    fun provideAttendanceDao(database: FluxDatabase): AttendanceDao = database.attendanceDao()
-
-    @Provides
-    fun providePerformanceDao(database: FluxDatabase): PerformanceDao = database.performanceDao()
-
-    @Provides
-    fun provideChatMessageDao(database: FluxDatabase): ChatMessageDao = database.chatMessageDao()
-
-    @Provides
-    fun provideUserProfileDao(database: FluxDatabase): UserProfileDao = database.userProfileDao()
+    fun provideAIInsightDao(db: FluxDatabase): AIInsightDao = db.aiInsightDao()
 }
+

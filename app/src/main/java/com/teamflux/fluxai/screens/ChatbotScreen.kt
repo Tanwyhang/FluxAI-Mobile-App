@@ -1,5 +1,6 @@
 package com.teamflux.fluxai.screens
 
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -46,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.teamflux.fluxai.model.ChatMessage
 import com.teamflux.fluxai.viewmodel.AuthViewModel
+import com.teamflux.fluxai.ui.theme.typewriterEffect
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,10 +85,11 @@ fun ChatbotScreen(authViewModel: AuthViewModel? = null) {
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isAdmin) "Admin AI Assistant" else "Employee AI Assistant",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        text = "",
+                        fontSize = 50.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.typewriterEffect(if (isAdmin) "Admin AI Assistant" else "Employee AI Assistant")
                     )
                 }
 
@@ -174,10 +177,9 @@ fun ChatbotScreen(authViewModel: AuthViewModel? = null) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun ChatInterface(userType: String) {
-    // Remove direct WebhookService instantiation since it requires DI
     val scope = rememberCoroutineScope()
 
     var messages by remember {
@@ -283,26 +285,32 @@ fun ChatInterface(userType: String) {
                             inputText = ""
                             isLoadingResponse = true
 
-                            // Generate fallback responses since we can't inject WebhookService here
+                            // Call webhook for employee chat (no fallbacks). Admin continues using local fallback path.
                             scope.launch {
                                 try {
-                                    android.util.Log.d("ChatInterface", "Processing message: $userMessage")
+                                    Log.d("ChatInterface", "Processing message: $userMessage")
 
-                                    // Generate appropriate fallback response based on user type
-                                    val aiResponse = generateFallbackChatResponse(userMessage, userType)
+                                    val aiResponse = if (userType == "Admin") {
+                                        // Admin path may use older behavior
+                                        generateFallbackChatResponse(userMessage, userType)
+                                    } else {
+                                        // Employee: always call webhook endpoint via postEmployeeChat (no fallback)
+                                        com.teamflux.fluxai.network.postEmployeeChat(message = userMessage)
+                                    }
 
-                                    android.util.Log.d("ChatInterface", "Generated response: $aiResponse")
+                                    Log.d("ChatInterface", "Received response: $aiResponse")
                                     messages = messages + ChatMessage(aiResponse, false)
                                 } catch (e: Exception) {
-                                    android.util.Log.e("ChatInterface", "Error generating response", e)
-                                    messages = messages + ChatMessage("Sorry, I encountered an error. Please try again.", false)
+                                    // No fallback for employee; show error to user and log
+                                    Log.e("ChatInterface", "Chat webhook failed: ${e.message}", e)
+                                    messages = messages + ChatMessage("Sorry, the chat service is currently unavailable. ${e.message ?: "Please try again later."}", false)
                                 } finally {
                                     isLoadingResponse = false
                                     // Scroll to bottom
                                     try {
                                         listState.animateScrollToItem(messages.size - 1)
-                                    } catch (e: Exception) {
-                                        // Handle potential scroll animation errors
+                                    } catch (ex: Exception) {
+                                        Log.d("ChatInterface", "Scroll to bottom failed", ex)
                                     }
                                 }
                             }

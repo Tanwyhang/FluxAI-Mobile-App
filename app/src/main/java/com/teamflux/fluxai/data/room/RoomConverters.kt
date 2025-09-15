@@ -28,4 +28,14 @@ class RoomConverters {
         val listType = object : TypeToken<List<Int>>() {}.type
         return gson.fromJson(value, listType)
     }
+
+    @TypeConverter
+    fun fromDate(date: java.util.Date?): Long? {
+        return date?.time
+    }
+
+    @TypeConverter
+    fun toDate(timestamp: Long?): java.util.Date? {
+        return timestamp?.let { java.util.Date(it) }
+    }
 }

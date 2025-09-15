@@ -9,11 +9,13 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.teamflux.fluxai.ui.theme.typewriterEffect
 import com.teamflux.fluxai.viewmodel.AuthViewModel
 import com.teamflux.fluxai.viewmodel.TeamViewModel
 
@@ -61,10 +63,11 @@ fun AdminTeamSetupScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "Welcome, Admin!",
-            fontSize = 28.sp,
+            text = "",
+            fontSize = 50.sp,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.typewriterEffect("Welcome, Admin!")
         )
 
         Spacer(modifier = Modifier.height(12.dp))

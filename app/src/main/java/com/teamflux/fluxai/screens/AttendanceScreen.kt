@@ -25,6 +25,7 @@ import com.teamflux.fluxai.model.Team
 import com.teamflux.fluxai.viewmodel.AuthViewModel
 import com.teamflux.fluxai.viewmodel.TeamViewModel
 import com.teamflux.fluxai.viewmodel.AttendanceViewModel
+import com.teamflux.fluxai.ui.theme.typewriterEffect
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -89,10 +90,10 @@ fun AttendanceScreen(
         ) {
             // Header
             Text(
-                text = "Attendance",
+                text = "",
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(bottom = 8.dp)
+                modifier = Modifier.padding(bottom = 8.dp).typewriterEffect("Attendance")
             )
 
             if (isAdmin) {

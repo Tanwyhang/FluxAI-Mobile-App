@@ -23,8 +23,10 @@ import com.teamflux.fluxai.ui.components.AnimatedGradientBackground
 import com.teamflux.fluxai.ui.theme.FluxAITheme
 import com.teamflux.fluxai.viewmodel.AuthViewModel
 import com.teamflux.fluxai.viewmodel.ThemeViewModel
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private val themeViewModel by viewModels<ThemeViewModel>()
     private val authViewModel by viewModels<AuthViewModel>()

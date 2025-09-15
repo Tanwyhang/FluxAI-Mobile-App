@@ -293,7 +293,7 @@ fun TeamScreen(authViewModel: AuthViewModel? = null) {
 
                     // AI Insights section
                     item {
-                        AIInsightsSection(selectedTeam)
+                        AIInsightsSection(selectedTeam, teamState.teamMembers)
                     }
                 }
             }
@@ -1001,14 +1001,15 @@ fun DeleteTeamConfirmationDialog(
 }
 
 @Composable
-fun AIInsightsSection(team: Team) {
+fun AIInsightsSection(team: Team, members: List<Map<String, Any>>) {
     val teamInsightsViewModel: TeamInsightsViewModel = hiltViewModel()
     val insights by teamInsightsViewModel.insights.collectAsState()
     val isLoading by teamInsightsViewModel.isLoading.collectAsState()
 
     // Load insights when team changes
     LaunchedEffect(team.teamId) {
-        teamInsightsViewModel.generateTeamInsights(team)
+        val teamRoles = members.mapNotNull { it["role"]?.toString() }.filter { it.isNotEmpty() }
+        teamInsightsViewModel.generateTeamInsights(team, members.size, teamRoles)
     }
 
     Card(

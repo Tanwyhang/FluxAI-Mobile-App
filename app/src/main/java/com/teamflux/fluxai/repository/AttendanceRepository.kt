@@ -4,8 +4,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.teamflux.fluxai.viewmodel.AttendanceRecord
 import com.teamflux.fluxai.viewmodel.TeamAttendanceCode
 import kotlinx.coroutines.tasks.await
-import java.text.SimpleDateFormat
-import java.util.*
 
 class AttendanceRepository {
     private val firestore = FirebaseFirestore.getInstance()

@@ -5,8 +5,9 @@ import com.teamflux.fluxai.model.Team
 import com.teamflux.fluxai.model.TeamMember
 import kotlinx.coroutines.tasks.await
 import java.util.*
+import javax.inject.Inject
 
-class TeamRepository {
+class TeamRepository @Inject constructor() {
     private val firestore = FirebaseFirestore.getInstance()
 
     suspend fun createTeam(
@@ -226,7 +227,7 @@ class TeamRepository {
             }
 
             // 3) Fallback: users/{uid}.teamId reference
-            var teamId: String? = null
+            var teamId: String?
             var createdMembership = false
             if (!membershipSnapshot.isEmpty) {
                 val membership = membershipSnapshot.documents.first()

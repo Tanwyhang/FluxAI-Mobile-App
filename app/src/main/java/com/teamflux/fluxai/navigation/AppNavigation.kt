@@ -91,7 +91,8 @@ fun AppNavigation(
                     }
                 }
             }
-            authState.isLoggedIn && authState.selectedRole != null -> {
+
+            else -> {
                 // User has selected a role - go to main
                 if (navController.currentDestination?.route != "main") {
                     navController.navigate("main") {
