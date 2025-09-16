@@ -18,13 +18,20 @@ data class Team(
     val createdAt: Date = Date()
 )
 
+// Refined team member model used across repository and UI
+// memberId is the stable identifier for a membership row (distinct from userId)
 data class TeamMember(
-    val userId: String = "",
-    val teamId: String = "", // belongs to what team
-    val username: String = "",
-    val role: String = "", // frontend | backend etc..
-    val email: String = "",
-    val phone: String = "",
+    val memberId: String,            // unique membership id
+    val teamId: String,              // owning team id
+    val userId: String? = null,      // optional app user id
+    val githubUsername: String,      // required for n8n/GitHub flows
+    val displayName: String? = null, // shown name; fallback to githubUsername in UI
+    val role: String = "",          // e.g., frontend, backend, PM
+    val email: String? = null,
+    val phone: String? = null,
+    val avatarUrl: String? = null,
+    val joinedAt: Date = Date(),
+    val isActive: Boolean = true
 )
 
 // --- ATTENDANCE ---
@@ -40,6 +47,7 @@ data class EmployeePerformance(
     val id: String, // Unique employee ID
     val githubUsername: String, // GitHub username
     val commits: Int, // Total commits in the timeframe (e.g., 30 days)
+    val commitDates: List<String> = emptyList(), // Commit dates for chart visualization
     val attendanceRate: Double, // Attendance rate (0.0 to 1.0)
     val collaborationScore: Double, // Collaboration score (0.0 to 10.0)
     val productivityScore: Double, // Productivity score (0.0 to 10.0)

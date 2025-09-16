@@ -2,7 +2,6 @@ package com.teamflux.fluxai.repository
 
 import com.teamflux.fluxai.model.AIEvaluation
 import com.teamflux.fluxai.model.EmployeePerformance
-import com.teamflux.fluxai.network.EmployeeMetrics
 import com.teamflux.fluxai.network.WebhookService
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,7 +9,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.random.Random
 
 @Singleton
 class PerformanceDataRepository @Inject constructor(
@@ -35,7 +33,6 @@ class PerformanceDataRepository @Inject constructor(
     }
 
     fun setSelectedTeamFromUsernames(usernames: List<Pair<String, String>>, teamId: String = "") {
-        // usernames: List of Pair<id, githubUsername>
         selectedTeamMembers.value = usernames.map { (id, username) ->
             BaseEmployee(id, name = "", role = "", githubUsername = username, teamId = teamId)
         }
@@ -47,18 +44,24 @@ class PerformanceDataRepository @Inject constructor(
             emit(emptyList())
             return@flow
         }
-        val performances = members.map { buildFromNetworkOrFallback(it) }
-        employeesState.value = performances
-        emit(performances)
+        val accumulator = mutableListOf<EmployeePerformance>()
+        employeesState.value = emptyList()
+        // One webhook call per teammate; emit as each completes
+        for (member in members) {
+            val perf = buildFromNetwork(member)
+            accumulator.add(perf)
+            employeesState.value = accumulator.toList()
+            emit(accumulator.toList())
+        }
     }
 
     fun getEmployeePerformance(employeeId: String): Flow<EmployeePerformance> = flow {
         val member = selectedTeamMembers.first().firstOrNull { it.id == employeeId }
         if (member == null) {
-            emit(generateFallback(employeeId))
+            emit(emptyPerformance(employeeId))
             return@flow
         }
-        emit(buildFromNetworkOrFallback(member))
+        emit(buildFromNetwork(member))
     }
 
     fun refreshAllEmployeePerformances(): Flow<List<EmployeePerformance>> = flow {
@@ -67,15 +70,21 @@ class PerformanceDataRepository @Inject constructor(
             emit(emptyList())
             return@flow
         }
-        val refreshed = members.map { buildFromNetworkOrFallback(it) }
-        employeesState.value = refreshed
-        emit(refreshed)
+        val accumulator = mutableListOf<EmployeePerformance>()
+        employeesState.value = emptyList()
+        for (member in members) {
+            val perf = buildFromNetwork(member)
+            val idx = accumulator.indexOfFirst { it.id == perf.id }
+            if (idx >= 0) accumulator[idx] = perf else accumulator.add(perf)
+            employeesState.value = accumulator.toList()
+            emit(accumulator.toList())
+        }
     }
 
     fun refreshEmployeePerformance(employeeId: String): Flow<EmployeePerformance> = flow {
         val member = selectedTeamMembers.first().firstOrNull { it.id == employeeId }
             ?: BaseEmployee(employeeId, "Unknown", "Engineer", "", "")
-        val updated = buildFromNetworkOrFallback(member)
+        val updated = buildFromNetwork(member)
         val list = employeesState.value.toMutableList().apply {
             val idx = indexOfFirst { it.id == employeeId }
             if (idx >= 0) set(idx, updated) else add(updated)
@@ -84,60 +93,36 @@ class PerformanceDataRepository @Inject constructor(
         emit(updated)
     }
 
-    // Build performance object from webhook (commit data + evaluation) or fallback
-    private suspend fun buildFromNetworkOrFallback(base: BaseEmployee): EmployeePerformance {
+    // Build performance object using a single webhook call: only username required
+    private suspend fun buildFromNetwork(base: BaseEmployee): EmployeePerformance {
         return try {
-            val commitData = webhookService.fetchCommitData(
-                githubUsername = base.githubUsername,
-                forceRefresh = true
-            )
-            val epochs = commitData.commitDates.mapNotNull { it.toLongOrNull() }
-            val attendanceRate = 0.9 + (0..9).random() / 100.0
-            val collaboration = 6 + (0..40).random() / 10.0
-            val productivity = 6 + (0..40).random() / 10.0
-            val metrics = EmployeeMetrics(
-                commits = epochs.size,
-                githubUsername = base.githubUsername,
-                attendanceRate = attendanceRate,
-                collaborationScore = collaboration,
-                productivityScore = productivity,
-            )
-            val aiEval = webhookService.evaluateEmployeePerformance(metrics)
+            val combined: Pair<AIEvaluation?, List<String>> = webhookService.fetchCombinedEmployeeSummary(base.githubUsername)
+            val ai: AIEvaluation? = combined.first
+            val dates: List<String> = combined.second
             EmployeePerformance(
                 id = base.id,
                 githubUsername = base.githubUsername,
-                attendanceRate = attendanceRate,
-                collaborationScore = collaboration,
-                productivityScore = productivity,
-                aiEvaluation = aiEval,
-                commits = epochs.size,
+                commits = dates.size,
+                commitDates = dates,
+                attendanceRate = 0.0,
+                collaborationScore = 0.0,
+                productivityScore = 0.0,
+                aiEvaluation = ai
             )
         } catch (_: Exception) {
-            generateFallback(base.id)
+            emptyPerformance(base.id, base.githubUsername)
         }
     }
 
-    // Fallback single
-    private fun generateFallback(id: String): EmployeePerformance {
-        val base = selectedTeamMembers.value.firstOrNull { it.id == id }
-        val rnd = Random(id.hashCode())
-        val commits = 5 + rnd.nextInt(20)
-        return EmployeePerformance(
-            id = id,
-            githubUsername = base?.githubUsername ?: "",
-            attendanceRate = 0.85 + rnd.nextDouble() * 0.15,
-            collaborationScore = 6 + rnd.nextDouble() * 4,
-            productivityScore = 6 + rnd.nextDouble() * 4,
-            commits = commits,
-            aiEvaluation = AIEvaluation(
-                overallRating = listOf("Average", "Good", "Excellent").random(rnd),
-                strengths = listOf("Reliable", "Team Player", "Learns quickly").shuffled(rnd).take(2),
-                improvements = listOf("Add tests", "Refactor modules", "Improve docs").shuffled(rnd).take(1),
-                recommendation = "Maintain momentum and focus on quality",
-                performanceTrend = listOf("Improving", "Stable", "Declining").random(rnd)
-            )
-        )
-    }
+    private fun emptyPerformance(id: String, username: String = ""): EmployeePerformance = EmployeePerformance(
 
-    private fun generateFallbackList(): List<EmployeePerformance> = selectedTeamMembers.value.map { generateFallback(it.id) }
+        id = id,
+        githubUsername = username,
+        commits = 0,
+        commitDates = emptyList(),
+        attendanceRate = 0.0,
+        collaborationScore = 0.0,
+        productivityScore = 0.0,
+        aiEvaluation = null
+    )
 }

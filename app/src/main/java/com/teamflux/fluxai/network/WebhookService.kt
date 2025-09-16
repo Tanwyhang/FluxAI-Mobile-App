@@ -9,8 +9,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -42,25 +42,22 @@ data class AIEvaluationResponse(
 
 @Serializable
 data class CommitDataResponse(
-    val commitDates: List<String> // List of commit dates from the last 30 days
+    val commitDates: List<String>
 )
 
-// Placeholder for EmployeeMetrics (since it was not provided)
 @Serializable
 data class CombinedEmployeePayload(
-    val output: AIEvaluationResponse? = null, // nested AI evaluation
-    val date: List<String>? = null,          // alternative commit date field
+    val output: AIEvaluationResponse? = null,
+    val date: List<String>? = null
 )
 
 class WebhookService(context: Context) {
     companion object {
-        // N8n webhook endpoints
         private const val EMPLOYEE_PERFORMANCE_ENDPOINT = "http://10.0.2.2:5678/webhook/commit-performance"
         private const val TEAM_INSIGHTS_ENDPOINT = "http://10.0.2.2:5678/webhook/team-insights"
         private const val ADMIN_CHAT_ENDPOINT = "http://10.0.2.2:5678/webhook/admin-chat"
         private const val EMPLOYEE_CHAT_ENDPOINT = "http://10.0.2.2:5678/webhook/employee-chat"
 
-        // Configuration
         private const val USE_WEBHOOKS = true
         const val DEBUG_WEBHOOKS = true
         private const val NETWORK_TIMEOUT = 30000
@@ -71,7 +68,7 @@ class WebhookService(context: Context) {
         }
     }
 
-    // ===== Public API (no persistence) =====
+    // ===== Public API =====
     suspend fun evaluateEmployeePerformanceByUsername(githubUsername: String): AIEvaluationResponse {
         return withContext(Dispatchers.IO) {
             if (USE_WEBHOOKS) {
@@ -82,25 +79,7 @@ class WebhookService(context: Context) {
                     val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, json.encodeToString(request))
                     if (response != null) {
                         logDebug("Raw evaluation response: ${response.take(300)}")
-                        // Try direct decode first
-                        val direct = runCatching { json.decodeFromString<AIEvaluationResponse>(response) }.getOrNull()
-                        if (direct != null && direct.overallRating.isNotBlank()) {
-                            return@withContext direct
-                        }
-                        // Try combined wrapper
-                        val combined = runCatching { json.decodeFromString<CombinedEmployeePayload>(response) }.getOrNull()
-                        if (combined?.output != null) {
-                            return@withContext combined.output
-                        }
-                        // Last resort: attempt manual JSON unwrap if structure unknown
-                        val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
-                        if (root is JsonObject && "output" in root) {
-                            val outElem = root["output"]
-                            if (outElem != null) {
-                                val outEval = runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), outElem) }.getOrNull()
-                                if (outEval != null) return@withContext outEval
-                            }
-                        }
+                        parseEvaluation(response)?.let { return@withContext it }
                     }
                 } catch (e: Exception) {
                     logError("N8n employee evaluation failed", e)
@@ -114,7 +93,6 @@ class WebhookService(context: Context) {
         return withContext(Dispatchers.IO) {
             if (USE_WEBHOOKS) {
                 try {
-                    // Build JSON payload manually to avoid requiring a generated serializer for the request class
                     val payload = JSONObject().apply {
                         put("teamName", teamName)
                         put("memberCount", memberCount)
@@ -165,25 +143,19 @@ class WebhookService(context: Context) {
         context: Map<String, String> = emptyMap()
     ): String {
         return withContext(Dispatchers.IO) {
-            try {
-                val request = N8nChatRequest(
-                    message = message,
-                    username = username,
-                    context = context + mapOf("userType" to "Employee")
-                )
-                logDebug("=== N8N EMPLOYEE CHAT ===\nUsername: $username\nMessage: $message\nEndpoint: $EMPLOYEE_CHAT_ENDPOINT")
+            val request = N8nChatRequest(
+                message = message,
+                username = username,
+                context = context + mapOf("userType" to "Employee")
+            )
+            logDebug("=== N8N EMPLOYEE CHAT ===\nUsername: $username\nMessage: $message\nEndpoint: $EMPLOYEE_CHAT_ENDPOINT")
 
-                val response = sendWebhookRequest(EMPLOYEE_CHAT_ENDPOINT, json.encodeToString(request))
-                if (response != null) {
-                    logDebug("N8n employee chat response received")
-                    return@withContext cleanTextResponse(response)
-                }
-
-                throw IllegalStateException("Employee chat webhook did not return a response")
-            } catch (e: Exception) {
-                logError("N8n employee chat failed", e)
-                throw e
+            val response = sendWebhookRequest(EMPLOYEE_CHAT_ENDPOINT, json.encodeToString(request))
+            if (response != null) {
+                logDebug("N8n employee chat response received")
+                return@withContext cleanTextResponse(response)
             }
+            throw IllegalStateException("Employee chat webhook did not return a response")
         }
     }
 
@@ -195,8 +167,9 @@ class WebhookService(context: Context) {
         return withContext(Dispatchers.IO) {
             if (USE_WEBHOOKS) {
                 try {
+                    // Primary: align with n8n flow using `username`
                     val request = mapOf(
-                        "githubUsername" to githubUsername,
+                        "username" to githubUsername,
                         "timeframe" to timeframe,
                         "forceRefresh" to forceRefresh.toString()
                     )
@@ -205,27 +178,17 @@ class WebhookService(context: Context) {
                     val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, json.encodeToString(request))
                     if (response != null) {
                         logDebug("Raw commit response: ${response.take(300)}")
-                        // Try direct expected structure
-                        val direct = runCatching { json.decodeFromString<CommitDataResponse>(response) }.getOrNull()
-                        if (direct != null) return@withContext direct
-                        // Try combined wrapper with alternative field names
-                        val combined = runCatching { json.decodeFromString<CombinedEmployeePayload>(response) }.getOrNull()
-                        if (combined != null) {
-                            val dates = when {
-                                !combined.date.isNullOrEmpty() -> combined.date
-                                else -> emptyList()
-                            }
-                            if (dates.isNotEmpty()) return@withContext CommitDataResponse(dates)
-                        }
-                        // Manual JSON parse fallback
-                        val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
-                        if (root is JsonObject) {
-                            val dates = when {
-                                root["date"] != null -> root["date"]!!.jsonArray.map { it.jsonPrimitive.content }
-                                else -> emptyList()
-                            }
-                            if (dates.isNotEmpty()) return@withContext CommitDataResponse(dates)
-                        }
+                        val dates = extractCommitDates(response)
+                        if (dates.isNotEmpty()) return@withContext CommitDataResponse(dates)
+                    }
+
+                    // Fallback: some flows only accept { username } and return array [{ output, date }]
+                    val usernameOnly = json.encodeToString(N8nEmployeePerformanceRequest(username = githubUsername))
+                    val response2 = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, usernameOnly)
+                    if (response2 != null) {
+                        logDebug("Raw commit response (fallback username-only): ${response2.take(300)}")
+                        val dates2 = extractCommitDates(response2)
+                        if (dates2.isNotEmpty()) return@withContext CommitDataResponse(dates2)
                     }
                 } catch (e: Exception) {
                     logError("N8n commit data fetch failed", e)
@@ -235,16 +198,76 @@ class WebhookService(context: Context) {
         }
     }
 
+    // Fetch both evaluation (output) and commit dates in one call using only { username }
+    suspend fun fetchCombinedEmployeeSummary(username: String): Pair<com.teamflux.fluxai.model.AIEvaluation?, List<String>> {
+        return withContext(Dispatchers.IO) {
+            val payload = json.encodeToString(N8nEmployeePerformanceRequest(username = username))
+            logDebug("=== N8N COMBINED EMPLOYEE SUMMARY ===\nGitHub Username: $username\nEndpoint: $EMPLOYEE_PERFORMANCE_ENDPOINT")
+            val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, payload)
+            if (response.isNullOrBlank()) return@withContext (null to emptyList())
+
+            val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
+            when (root) {
+                is JsonArray -> {
+                    val first = root.firstOrNull()
+                    val obj = first as? JsonObject
+                    val output = obj?.get("output")?.let { el ->
+                        runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), el) }.getOrNull()
+                    }
+                    val mapped = output?.let { o ->
+                        com.teamflux.fluxai.model.AIEvaluation(
+                            overallRating = o.overallRating,
+                            strengths = o.strengths,
+                            improvements = o.improvements,
+                            recommendation = o.recommendation,
+                            performanceTrend = o.performanceTrend
+                        )
+                    }
+                    val dates = (obj?.get("date") as? JsonArray)?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
+                    mapped to dates
+                }
+                is JsonObject -> {
+                    val output = root["output"]?.let { el ->
+                        runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), el) }.getOrNull()
+                    }
+                    val mapped = output?.let { o ->
+                        com.teamflux.fluxai.model.AIEvaluation(
+                            overallRating = o.overallRating,
+                            strengths = o.strengths,
+                            improvements = o.improvements,
+                            recommendation = o.recommendation,
+                            performanceTrend = o.performanceTrend
+                        )
+                    }
+                    val dates = (root["date"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
+                    mapped to dates
+                }
+                else -> {
+                    val eval = parseEvaluation(response)?.let { o ->
+                        com.teamflux.fluxai.model.AIEvaluation(
+                            overallRating = o.overallRating,
+                            strengths = o.strengths,
+                            improvements = o.improvements,
+                            recommendation = o.recommendation,
+                            performanceTrend = o.performanceTrend
+                        )
+                    }
+                    eval to extractCommitDates(response)
+                }
+            }
+        }
+    }
+
     suspend fun evaluateEmployeePerformance(metrics: EmployeeMetrics): AIEvaluation {
         return withContext(Dispatchers.IO) {
             try {
-                val aiResponse = evaluateEmployeePerformanceByUsername(metrics.githubUsername)
+                val ai = evaluateEmployeePerformanceByUsername(metrics.githubUsername)
                 AIEvaluation(
-                    overallRating = aiResponse.overallRating,
-                    strengths = aiResponse.strengths,
-                    improvements = aiResponse.improvements,
-                    recommendation = aiResponse.recommendation,
-                    performanceTrend = aiResponse.performanceTrend
+                    overallRating = ai.overallRating,
+                    strengths = ai.strengths,
+                    improvements = ai.improvements,
+                    recommendation = ai.recommendation,
+                    performanceTrend = ai.performanceTrend
                 )
             } catch (e: Exception) {
                 logError("Employee performance evaluation failed", e)
@@ -268,18 +291,16 @@ class WebhookService(context: Context) {
                 readTimeout = NETWORK_TIMEOUT
             }
 
-            connection.outputStream.use { outputStream ->
-                outputStream.write(payload.toByteArray())
-                outputStream.flush()
+            connection.outputStream.use { os ->
+                os.write(payload.toByteArray())
+                os.flush()
             }
 
             val responseCode = connection.responseCode
             logDebug("Response code: $responseCode")
 
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                val responseText = connection.inputStream.use { inputStream ->
-                    inputStream.bufferedReader().readText()
-                }
+                val responseText = connection.inputStream.use { it.bufferedReader().readText() }
                 logDebug("Response received: ${responseText.take(200)}...")
                 responseText
             } else {
@@ -294,13 +315,86 @@ class WebhookService(context: Context) {
     }
 
     private fun cleanTextResponse(response: String): String {
-        return response.trim().let { trimmed ->
-            if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-                trimmed.substring(1, trimmed.length - 1)
-            } else {
-                trimmed
+        val trimmed = response.trim()
+        return if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+            trimmed.substring(1, trimmed.length - 1)
+        } else trimmed
+    }
+
+    // ===== Parsing helpers =====
+    private fun parseEvaluation(response: String): AIEvaluationResponse? {
+        // 1) Direct object
+        runCatching { json.decodeFromString(AIEvaluationResponse.serializer(), response) }
+            .getOrNull()?.let { if (it.overallRating.isNotBlank()) return it }
+
+        // 2) Combined wrapper
+        runCatching { json.decodeFromString(CombinedEmployeePayload.serializer(), response) }
+            .getOrNull()?.output?.let { return it }
+
+        // 3) Inspect JSON element (object/array)
+        val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
+        when (root) {
+            is JsonObject -> {
+                val outElem = root["output"]
+                if (outElem != null) {
+                    return runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), outElem) }.getOrNull()
+                }
             }
+            is JsonArray -> {
+                // Look for first object with output
+                root.firstOrNull { it is JsonObject && it["output"] != null }?.let { elem ->
+                    val obj = elem as JsonObject
+                    val outElem = obj["output"]
+                    if (outElem != null) {
+                        return runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), outElem) }.getOrNull()
+                    }
+                }
+                // Or maybe array of AIEvaluationResponse
+                root.firstOrNull()?.let { first ->
+                    return runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), first) }.getOrNull()
+                }
+            }
+            else -> {}
         }
+        return null
+    }
+
+    private fun extractCommitDates(response: String): List<String> {
+        // 1) Direct expected shape
+        runCatching { json.decodeFromString(CommitDataResponse.serializer(), response) }
+            .getOrNull()?.commitDates?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        // 2) Combined wrapper { date: [...] }
+        runCatching { json.decodeFromString(CombinedEmployeePayload.serializer(), response) }
+            .getOrNull()?.date?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        // 3) Inspect JSON element
+        val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
+        when (root) {
+            is JsonObject -> {
+                val keys = listOf("date", "commitDates", "dates", "commits")
+                for (k in keys) {
+                    val arr = root[k] as? JsonArray
+                    if (arr != null && arr.isNotEmpty()) {
+                        return arr.mapNotNull { it.jsonPrimitive.content }
+                    }
+                }
+            }
+            is JsonArray -> {
+                val first = root.firstOrNull()
+                val obj = first as? JsonObject
+                val dates = obj?.get("date") as? JsonArray
+                if (dates != null && dates.isNotEmpty()) {
+                    return dates.mapNotNull { it.jsonPrimitive.content }
+                }
+                // Or array of strings
+                if (root.isNotEmpty() && root.all { it !is JsonObject }) {
+                    return root.mapNotNull { it.jsonPrimitive.content }
+                }
+            }
+            else -> {}
+        }
+        return emptyList()
     }
 
     // ===== Fallback Generators =====
@@ -404,7 +498,6 @@ class WebhookService(context: Context) {
         }
     }
 
-    // Note: This method was defined but not used; included here for completeness
     private fun generateEmployeeFallbackResponse(message: String, githubUsername: String, context: Map<String, String>): String {
         val lowercaseMessage = message.lowercase()
         return when {
@@ -489,9 +582,7 @@ class WebhookService(context: Context) {
     }
 
     private fun logDebug(message: String) {
-        if (DEBUG_WEBHOOKS) {
-            Log.d("WebhookService", message)
-        }
+        if (DEBUG_WEBHOOKS) Log.d("WebhookService", message)
     }
 
     private fun logError(message: String, throwable: Throwable? = null) {

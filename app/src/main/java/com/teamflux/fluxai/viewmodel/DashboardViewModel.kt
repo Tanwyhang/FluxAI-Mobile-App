@@ -96,7 +96,7 @@ class DashboardViewModel @Inject constructor(
         val current = _uiState.value
         if (current !is DashboardUiState.Admin) return
         // set selected and start loading members + performances
-        _uiState.value = current.copy(selectedTeamId = teamId, loadingPerformances = true)
+        _uiState.value = current.copy(selectedTeamId = teamId, loadingPerformances = true, performances = emptyList())
         viewModelScope.launch {
             try {
                 val membersResult = teamRepository.getTeamMembersByTeamId(teamId)
@@ -115,6 +115,8 @@ class DashboardViewModel @Inject constructor(
                     )
                 }.filter { it.githubUsername.isNotBlank() }
 
+                val expectedCount = members.size
+
                 // Update team with members in state
                 val updatedTeams = current.teams.map { t ->
                     if (t.id == teamId) t.copy(members = members) else t
@@ -122,7 +124,8 @@ class DashboardViewModel @Inject constructor(
                 _uiState.value = current.copy(
                     teams = updatedTeams,
                     selectedTeamId = teamId,
-                    loadingPerformances = true
+                    loadingPerformances = true,
+                    performances = emptyList()
                 )
 
                 // Wire repository with members and refresh performances
@@ -140,9 +143,10 @@ class DashboardViewModel @Inject constructor(
                 performanceDataRepository.refreshAllEmployeePerformances().collect { perfs ->
                     val after = _uiState.value
                     if (after is DashboardUiState.Admin && after.selectedTeamId == teamId) {
+                        val complete = perfs.size >= expectedCount && expectedCount != 0
                         _uiState.value = after.copy(
                             performances = perfs,
-                            loadingPerformances = false
+                            loadingPerformances = !complete
                         )
                     }
                 }

@@ -423,7 +423,7 @@ private fun Admin.toMap(): Map<String, Any?> = mapOf(
 private fun TeamMember.toMap(): Map<String, Any?> = mapOf(
     "userId" to userId,
     "teamId" to teamId,
-    "username" to username,
+    "username" to githubUsername,
     "role" to role,
     "email" to email,
     "phone" to phone
