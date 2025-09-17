@@ -58,6 +58,7 @@ fun ChatbotScreen(authViewModel: AuthViewModel? = null) {
 
     val userRole = authState.selectedRole ?: "employee"
     val isAdmin = userRole == "admin"
+    val sessionId = rememberSaveable(authState.currentUser?.uid) { authState.currentUser?.uid ?: "guest-session" }
     var isKnowledgeBaseExpanded by rememberSaveable { mutableStateOf(false) }
 
     Column(
@@ -173,30 +174,21 @@ fun ChatbotScreen(authViewModel: AuthViewModel? = null) {
         }
 
         // Chat Interface
-        ChatInterface(if (isAdmin) "Admin" else "Employee")
+        ChatInterface(
+            userType = if (isAdmin) "Admin" else "Employee",
+            sessionId = sessionId
+        )
     }
 }
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-fun ChatInterface(userType: String) {
+fun ChatInterface(userType: String, sessionId: String) {
     val scope = rememberCoroutineScope()
 
     var messages by remember {
         mutableStateOf(
-            if (userType == "Admin") {
-                listOf(
-                    ChatMessage("Hello! I'm your AI assistant for team management. I can provide insights on team performance, analytics, and management recommendations. How can I help you today?", false),
-                    ChatMessage("What insights do you have for my team?", true),
-                    ChatMessage("Based on recent activity, your team shows strong collaboration. I recommend focusing on code review efficiency to boost productivity further.", false)
-                )
-            } else {
-                listOf(
-                    ChatMessage("Hello! I'm your AI assistant for personal development and productivity. I can help with coding guidance, career advice, and skill improvement. What can I assist you with?", false),
-                    ChatMessage("How can I improve my coding skills?", true),
-                    ChatMessage("Based on your recent commits, I recommend focusing on test-driven development. Here are some resources and practices that can help you improve...", false)
-                )
-            }
+            emptyList<ChatMessage>()
         )
     }
     var inputText by rememberSaveable { mutableStateOf("") }
@@ -285,25 +277,32 @@ fun ChatInterface(userType: String) {
                             inputText = ""
                             isLoadingResponse = true
 
-                            // Call webhook for employee chat (no fallbacks). Admin continues using local fallback path.
+                            // Route both Admin and Employee via webhooks (sessionId envelope for n8n)
                             scope.launch {
                                 try {
-                                    Log.d("ChatInterface", "Processing message: $userMessage")
+                                    Log.d("ChatInterface", "Processing message: $userMessage for $userType with sessionId=$sessionId")
 
                                     val aiResponse = if (userType == "Admin") {
-                                        // Admin path may use older behavior
-                                        generateFallbackChatResponse(userMessage, userType)
+                                        com.teamflux.fluxai.network.postAdminChat(
+                                            sessionId = sessionId,
+                                            message = userMessage,
+                                            username = sessionId
+                                        )
                                     } else {
-                                        // Employee: always call webhook endpoint via postEmployeeChat (no fallback)
-                                        com.teamflux.fluxai.network.postEmployeeChat(message = userMessage)
+                                        com.teamflux.fluxai.network.postEmployeeChat(
+                                            sessionId = sessionId,
+                                            message = userMessage,
+                                            username = sessionId
+                                        )
                                     }
 
-                                    Log.d("ChatInterface", "Received response: $aiResponse")
+                                    Log.d("ChatInterface", "Received response: ${aiResponse.take(120)}")
                                     messages = messages + ChatMessage(aiResponse, false)
                                 } catch (e: Exception) {
-                                    // No fallback for employee; show error to user and log
+                                    // Show error to user; no local fallback
                                     Log.e("ChatInterface", "Chat webhook failed: ${e.message}", e)
-                                    messages = messages + ChatMessage("Sorry, the chat service is currently unavailable. ${e.message ?: "Please try again later."}", false)
+                                    val fallback = e.message ?: "Please try again later."
+                                    messages = messages + ChatMessage("Sorry, the chat service is currently unavailable. $fallback", false)
                                 } finally {
                                     isLoadingResponse = false
                                     // Scroll to bottom
@@ -332,51 +331,6 @@ fun ChatInterface(userType: String) {
     }
 }
 
-// Helper function to generate fallback responses
-private fun generateFallbackChatResponse(message: String, userType: String): String {
-    val lowercaseMessage = message.lowercase()
-
-    return if (userType == "Admin") {
-        when {
-            lowercaseMessage.contains("performance") || lowercaseMessage.contains("analytics") ->
-                "Team performance metrics show positive trends. Current velocity and code quality indicators suggest good productivity levels across team members."
-            lowercaseMessage.contains("team") || lowercaseMessage.contains("collaboration") ->
-                "Team dynamics analysis indicates strong collaboration patterns. Consider implementing regular knowledge-sharing sessions to further enhance team cohesion."
-            lowercaseMessage.contains("productivity") || lowercaseMessage.contains("efficiency") ->
-                "Productivity metrics are within expected ranges. Focus areas include optimizing code review cycles and reducing deployment friction."
-            lowercaseMessage.contains("resource") || lowercaseMessage.contains("planning") ->
-                "Resource allocation appears balanced based on current project demands. Monitor sprint capacity to ensure sustainable team velocity."
-            lowercaseMessage.contains("quality") || lowercaseMessage.contains("review") ->
-                "Code quality standards are being maintained well. Consider automated quality gates to further streamline the review process."
-            lowercaseMessage.contains("budget") || lowercaseMessage.contains("cost") ->
-                "Current project costs are tracking within budget. Consider optimizing development processes to improve cost efficiency."
-            lowercaseMessage.contains("timeline") || lowercaseMessage.contains("deadline") ->
-                "Project timelines appear manageable with current team capacity. Regular milestone reviews can help maintain schedule adherence."
-            else ->
-                "I can help with team analytics, performance insights, resource planning, and management recommendations. What specific area interests you?"
-        }
-    } else {
-        when {
-            lowercaseMessage.contains("performance") || lowercaseMessage.contains("progress") ->
-                "Your development activity shows consistent patterns. Focus on maintaining code quality while gradually increasing your contribution velocity."
-            lowercaseMessage.contains("skill") || lowercaseMessage.contains("learn") ->
-                "Based on current trends, consider exploring advanced testing frameworks and architectural patterns to enhance your technical toolkit."
-            lowercaseMessage.contains("career") || lowercaseMessage.contains("growth") ->
-                "Your consistent contributions demonstrate growth potential. Consider taking on code review responsibilities and mentoring opportunities."
-            lowercaseMessage.contains("productivity") || lowercaseMessage.contains("efficiency") ->
-                "Focus on time management and breaking down complex tasks into smaller, manageable commits for better tracking and collaboration."
-            lowercaseMessage.contains("team") || lowercaseMessage.contains("collaboration") ->
-                "Effective team collaboration includes active participation in code reviews and clear communication in pull requests."
-            lowercaseMessage.contains("code") || lowercaseMessage.contains("programming") ->
-                "Good coding practices include writing clean, readable code, comprehensive testing, and thorough documentation. What specific area would you like to improve?"
-            lowercaseMessage.contains("project") || lowercaseMessage.contains("task") ->
-                "Break down complex projects into smaller, manageable tasks. Use version control effectively and communicate progress regularly with your team."
-            else ->
-                "I'm here to help with your professional development, coding practices, and career growth. What would you like to focus on?"
-        }
-    }
-}
-
 @Composable
 fun ChatBubble(message: ChatMessage) {
     Row(
@@ -401,13 +355,8 @@ fun ChatBubble(message: ChatMessage) {
         ) {
             Text(
                 text = message.text,
-                modifier = Modifier.padding(12.dp),
-                color = if (message.isUser) {
-                    MaterialTheme.colorScheme.onPrimary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                style = MaterialTheme.typography.bodyMedium
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                color = if (message.isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }

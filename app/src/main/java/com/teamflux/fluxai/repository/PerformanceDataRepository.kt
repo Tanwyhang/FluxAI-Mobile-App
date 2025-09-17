@@ -96,17 +96,19 @@ class PerformanceDataRepository @Inject constructor(
     // Build performance object using a single webhook call: only username required
     private suspend fun buildFromNetwork(base: BaseEmployee): EmployeePerformance {
         return try {
-            val combined: Pair<AIEvaluation?, List<String>> = webhookService.fetchCombinedEmployeeSummary(base.githubUsername)
-            val ai: AIEvaluation? = combined.first
-            val dates: List<String> = combined.second
+            val combined = webhookService.fetchCombinedEmployeeSummary(base.githubUsername)
+            val ai: AIEvaluation? = combined.evaluation
+            val dates: List<String> = combined.commitDates
+            val collab = combined.collaborationScore ?: 0.0
+            val prod = combined.productivityScore ?: 0.0
             EmployeePerformance(
                 id = base.id,
                 githubUsername = base.githubUsername,
                 commits = dates.size,
                 commitDates = dates,
                 attendanceRate = 0.0,
-                collaborationScore = 0.0,
-                productivityScore = 0.0,
+                collaborationScore = collab.coerceIn(0.0, 10.0),
+                productivityScore = prod.coerceIn(0.0, 10.0),
                 aiEvaluation = ai
             )
         } catch (_: Exception) {

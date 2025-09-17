@@ -15,11 +15,19 @@ class TeamInsightsViewModel @Inject constructor(
     private val webhookService: WebhookService
 ) : ViewModel() {
 
+    private val insightsCache = mutableMapOf<String, List<String>>()
+
     private val _insights = MutableStateFlow<List<String>>(emptyList())
     val insights: StateFlow<List<String>> = _insights
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
+
+    fun setCurrentTeam(teamId: String) {
+        // Restore cached insights for this team (if any) without refetching
+        _insights.value = insightsCache[teamId] ?: emptyList()
+        _isLoading.value = false
+    }
 
     fun generateTeamInsights(team: Team, memberCount: Int = 5, teamRoles: List<String> = emptyList()) {
         viewModelScope.launch {
@@ -30,6 +38,7 @@ class TeamInsightsViewModel @Inject constructor(
                     memberCount = memberCount,
                     teamRoles = teamRoles
                 )
+                insightsCache[team.teamId] = teamInsights
                 _insights.value = teamInsights
             } catch (e: Exception) {
                 // If webhook fails, Room fallback is handled inside WebhookService
@@ -38,5 +47,10 @@ class TeamInsightsViewModel @Inject constructor(
                 _isLoading.value = false
             }
         }
+    }
+
+    fun clearInsights() {
+        _insights.value = emptyList()
+        _isLoading.value = false
     }
 }

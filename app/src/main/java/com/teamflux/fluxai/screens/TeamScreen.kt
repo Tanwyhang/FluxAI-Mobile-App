@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -1006,10 +1007,9 @@ fun AIInsightsSection(team: Team, members: List<Map<String, Any>>) {
     val insights by teamInsightsViewModel.insights.collectAsState()
     val isLoading by teamInsightsViewModel.isLoading.collectAsState()
 
-    // Load insights when team changes
+    // Restore cached insights when team changes (do not clear on rotation)
     LaunchedEffect(team.teamId) {
-        val teamRoles = members.mapNotNull { it["role"]?.toString() }.filter { it.isNotEmpty() }
-        teamInsightsViewModel.generateTeamInsights(team, members.size, teamRoles)
+        teamInsightsViewModel.setCurrentTeam(team.teamId)
     }
 
     Card(
@@ -1022,24 +1022,40 @@ fun AIInsightsSection(team: Team, members: List<Map<String, Any>>) {
             modifier = Modifier.padding(16.dp)
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(
-                    imageVector = Icons.Default.Analytics,
-                    contentDescription = "AI Insights",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "AI Insights",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-                if (isLoading) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Analytics,
+                        contentDescription = "AI Insights",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                    Text(
+                        text = "AI Insights",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    if (isLoading) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        val teamRoles = members.mapNotNull { it["role"]?.toString() }.filter { it.isNotEmpty() }
+                        teamInsightsViewModel.generateTeamInsights(team, members.size, teamRoles)
+                    },
+                    enabled = !isLoading
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh AI Insights", modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Refresh")
                 }
             }
 
@@ -1065,7 +1081,7 @@ fun AIInsightsSection(team: Team, members: List<Map<String, Any>>) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "No insights available at the moment",
+                        text = "No insights yet. Tap Refresh to generate.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSecondaryContainer
                     )

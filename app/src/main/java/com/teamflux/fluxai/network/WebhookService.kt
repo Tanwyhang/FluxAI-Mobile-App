@@ -8,9 +8,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -48,7 +50,16 @@ data class CommitDataResponse(
 @Serializable
 data class CombinedEmployeePayload(
     val output: AIEvaluationResponse? = null,
-    val date: List<String>? = null
+    val date: List<String>? = null,
+    val collaborationScore: Double? = null,
+    val productivityScore: Double? = null
+)
+
+data class CombinedSummary(
+    val evaluation: AIEvaluation?,
+    val commitDates: List<String>,
+    val collaborationScore: Double?,
+    val productivityScore: Double?
 )
 
 class WebhookService(context: Context) {
@@ -102,9 +113,73 @@ class WebhookService(context: Context) {
                     logDebug("=== N8N TEAM INSIGHTS GENERATION ===\nTeam: $teamName, Members: $memberCount\nRoles: ${teamRoles.joinToString(", ")}\nEndpoint: $TEAM_INSIGHTS_ENDPOINT")
 
                     val response = sendWebhookRequest(TEAM_INSIGHTS_ENDPOINT, payload)
-                    if (response != null) {
-                        logDebug("N8n team insights received successfully")
-                        return@withContext json.decodeFromString<List<String>>(response)
+                    if (!response.isNullOrBlank()) {
+                        // 1) Direct decode to List<String>
+                        runCatching { json.decodeFromString<List<String>>(response) }
+                            .getOrNull()?.let { return@withContext it }
+
+                        val cleaned = cleanTextResponse(response)
+                        runCatching { json.decodeFromString<List<String>>(cleaned) }
+                            .getOrNull()?.let { return@withContext it }
+
+                        // 2) Parse JSON element to support multiple shapes
+                        val root = runCatching { json.parseToJsonElement(cleaned) }.getOrNull()
+                        when (root) {
+                            is JsonArray -> {
+                                // a) Array of strings
+                                val strings = root.mapNotNull { (it as? JsonPrimitive)?.content }
+                                if (strings.isNotEmpty()) return@withContext strings
+
+                                // b) Array of objects (e.g., [{"result":[..]}, {"text":"[ ... ]"}])
+                                val aggregated = mutableListOf<String>()
+                                root.forEach { el ->
+                                    val obj = el as? JsonObject ?: return@forEach
+                                    // Prefer "result" array
+                                    val resultArr = obj["result"] as? JsonArray
+                                    if (resultArr != null) {
+                                        aggregated += resultArr.mapNotNull { it.jsonPrimitive.content }
+                                    } else {
+                                        // "result" as JSON-array string
+                                        val resultStr = obj["result"]?.jsonPrimitive?.content
+                                        if (!resultStr.isNullOrBlank()) {
+                                            runCatching { json.decodeFromString<List<String>>(cleanTextResponse(resultStr)) }
+                                                .getOrNull()?.let { aggregated += it }
+                                        }
+                                    }
+                                    // Legacy: "text" carries JSON-array string
+                                    val textStr = obj["text"]?.jsonPrimitive?.content
+                                    if (!textStr.isNullOrBlank()) {
+                                        runCatching { json.decodeFromString<List<String>>(cleanTextResponse(textStr)) }
+                                            .getOrNull()?.let { aggregated += it }
+                                    }
+                                }
+                                if (aggregated.isNotEmpty()) return@withContext aggregated
+                            }
+                            is JsonObject -> {
+                                // c) Object with one of keys -> array or JSON-array string
+                                val keys = listOf("result", "insights", "data", "items", "text")
+                                for (k in keys) {
+                                    val arr = root[k] as? JsonArray
+                                    if (arr != null) {
+                                        val list = arr.mapNotNull { it.jsonPrimitive.content }
+                                        if (list.isNotEmpty()) return@withContext list
+                                    }
+                                    val txt = root[k]?.jsonPrimitive?.content
+                                    if (!txt.isNullOrBlank()) {
+                                        runCatching { json.decodeFromString<List<String>>(cleanTextResponse(txt)) }
+                                            .getOrNull()?.let { return@withContext it }
+                                    }
+                                }
+                                // d) Last resort: take primitive values
+                                val values = root.values.mapNotNull { (it as? JsonPrimitive)?.content }
+                                if (values.isNotEmpty()) return@withContext values
+                            }
+                            else -> {}
+                        }
+
+                        // 3) Plain text fallback: split by lines
+                        val lines = cleaned.lines().map { it.trim() }.filter { it.isNotBlank() }
+                        if (lines.size > 1) return@withContext lines
                     }
                 } catch (e: Exception) {
                     logError("N8n team insights failed", e)
@@ -159,92 +234,79 @@ class WebhookService(context: Context) {
         }
     }
 
-    suspend fun fetchCommitData(
-        githubUsername: String,
-        timeframe: String = "7days",
-        forceRefresh: Boolean = false
-    ): CommitDataResponse {
-        return withContext(Dispatchers.IO) {
-            if (USE_WEBHOOKS) {
-                try {
-                    // Primary: align with n8n flow using `username`
-                    val request = mapOf(
-                        "username" to githubUsername,
-                        "timeframe" to timeframe,
-                        "forceRefresh" to forceRefresh.toString()
-                    )
-                    logDebug("=== N8N COMMIT DATA FETCH ===\nEmployee: $githubUsername\nTimeframe: $timeframe\nForce Refresh: $forceRefresh")
-
-                    val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, json.encodeToString(request))
-                    if (response != null) {
-                        logDebug("Raw commit response: ${response.take(300)}")
-                        val dates = extractCommitDates(response)
-                        if (dates.isNotEmpty()) return@withContext CommitDataResponse(dates)
-                    }
-
-                    // Fallback: some flows only accept { username } and return array [{ output, date }]
-                    val usernameOnly = json.encodeToString(N8nEmployeePerformanceRequest(username = githubUsername))
-                    val response2 = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, usernameOnly)
-                    if (response2 != null) {
-                        logDebug("Raw commit response (fallback username-only): ${response2.take(300)}")
-                        val dates2 = extractCommitDates(response2)
-                        if (dates2.isNotEmpty()) return@withContext CommitDataResponse(dates2)
-                    }
-                } catch (e: Exception) {
-                    logError("N8n commit data fetch failed", e)
-                }
-            }
-            generateCommitDataFallback(githubUsername)
-        }
-    }
-
     // Fetch both evaluation (output) and commit dates in one call using only { username }
-    suspend fun fetchCombinedEmployeeSummary(username: String): Pair<com.teamflux.fluxai.model.AIEvaluation?, List<String>> {
+    suspend fun fetchCombinedEmployeeSummary(username: String): CombinedSummary {
         return withContext(Dispatchers.IO) {
             val payload = json.encodeToString(N8nEmployeePerformanceRequest(username = username))
             logDebug("=== N8N COMBINED EMPLOYEE SUMMARY ===\nGitHub Username: $username\nEndpoint: $EMPLOYEE_PERFORMANCE_ENDPOINT")
             val response = sendWebhookRequest(EMPLOYEE_PERFORMANCE_ENDPOINT, payload)
-            if (response.isNullOrBlank()) return@withContext (null to emptyList())
+            if (response.isNullOrBlank()) return@withContext CombinedSummary(null, emptyList(), null, null)
 
             val root = runCatching { json.parseToJsonElement(response) }.getOrNull()
             when (root) {
                 is JsonArray -> {
-                    val first = root.firstOrNull()
-                    val obj = first as? JsonObject
-                    val output = obj?.get("output")?.let { el ->
-                        runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), el) }.getOrNull()
+                    // Supports: [{"output":[{"output":{... with scores}}]}]
+                    var eval: AIEvaluation? = null
+                    var collab: Double? = null
+                    var prod: Double? = null
+                    var dates: List<String> = emptyList()
+                    root.forEach { el ->
+                        val obj = el as? JsonObject ?: return@forEach
+                        val outEl = obj["output"]
+                        if (outEl is JsonArray) {
+                            val first = outEl.firstOrNull() as? JsonObject
+                            val nestedOut = (first?.get("output") as? JsonObject) ?: first
+                            if (nestedOut != null) {
+                                val ar = runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), nestedOut) }.getOrNull()
+                                if (ar != null) {
+                                    eval = AIEvaluation(ar.overallRating, ar.strengths, ar.improvements, ar.recommendation, ar.performanceTrend)
+                                    collab = nestedOut["collaborationScore"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: collab
+                                    prod = nestedOut["productivityScore"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: prod
+                                }
+                            }
+                        } else if (outEl is JsonObject) {
+                            val ar = runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), outEl) }.getOrNull()
+                            if (ar != null) {
+                                eval = AIEvaluation(ar.overallRating, ar.strengths, ar.improvements, ar.recommendation, ar.performanceTrend)
+                                collab = outEl["collaborationScore"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: collab
+                                prod = outEl["productivityScore"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: prod
+                            }
+                        }
+                        val d = (obj["date"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
+                        if (d.isNotEmpty()) dates = d
                     }
-                    val mapped = output?.let { o ->
-                        com.teamflux.fluxai.model.AIEvaluation(
-                            overallRating = o.overallRating,
-                            strengths = o.strengths,
-                            improvements = o.improvements,
-                            recommendation = o.recommendation,
-                            performanceTrend = o.performanceTrend
-                        )
-                    }
-                    val dates = (obj?.get("date") as? JsonArray)?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
-                    mapped to dates
+                    CombinedSummary(eval, dates, collab, prod)
                 }
                 is JsonObject -> {
-                    val output = root["output"]?.let { el ->
-                        runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), el) }.getOrNull()
-                    }
-                    val mapped = output?.let { o ->
-                        com.teamflux.fluxai.model.AIEvaluation(
-                            overallRating = o.overallRating,
-                            strengths = o.strengths,
-                            improvements = o.improvements,
-                            recommendation = o.recommendation,
-                            performanceTrend = o.performanceTrend
-                        )
+                    val outEl = root["output"]
+                    var eval: AIEvaluation? = null
+                    var collab: Double? = null
+                    var prod: Double? = null
+                    if (outEl is JsonArray) {
+                        val first = outEl.firstOrNull() as? JsonObject
+                        val nestedOut = (first?.get("output") as? JsonObject) ?: first
+                        if (nestedOut != null) {
+                            val ar = runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), nestedOut) }.getOrNull()
+                            if (ar != null) {
+                                eval = AIEvaluation(ar.overallRating, ar.strengths, ar.improvements, ar.recommendation, ar.performanceTrend)
+                                collab = nestedOut["collaborationScore"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                                prod = nestedOut["productivityScore"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                            }
+                        }
+                    } else if (outEl is JsonObject) {
+                        val ar = runCatching { json.decodeFromJsonElement(AIEvaluationResponse.serializer(), outEl) }.getOrNull()
+                        if (ar != null) {
+                            eval = AIEvaluation(ar.overallRating, ar.strengths, ar.improvements, ar.recommendation, ar.performanceTrend)
+                            collab = outEl["collaborationScore"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                            prod = outEl["productivityScore"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                        }
                     }
                     val dates = (root["date"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
-                    mapped to dates
+                    CombinedSummary(eval, dates, collab, prod)
                 }
                 else -> {
                     val eval = parseEvaluation(response)?.let { o ->
-                        com.teamflux.fluxai.model.AIEvaluation(
+                        AIEvaluation(
                             overallRating = o.overallRating,
                             strengths = o.strengths,
                             improvements = o.improvements,
@@ -252,7 +314,7 @@ class WebhookService(context: Context) {
                             performanceTrend = o.performanceTrend
                         )
                     }
-                    eval to extractCommitDates(response)
+                    CombinedSummary(eval, extractCommitDates(response), null, null)
                 }
             }
         }
