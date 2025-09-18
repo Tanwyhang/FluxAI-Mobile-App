@@ -19,8 +19,19 @@ class UserRepository @Inject constructor() {
     suspend fun getCurrentUserRole(): String {
         val uid = auth.currentUser?.uid ?: return "team_member"
         return try {
-            val doc = firestore.collection("users").document(uid).get().await()
-            doc.getString("role") ?: "team_member"
+            var role = "team_member"
+            val userDoc = firestore.collection("users").document(uid).get().await()
+            if (userDoc.exists()) {
+                role = (userDoc.getString("role") ?: role).trim()
+            }
+            // If still team_member, check admins collection
+            if (role.equals("team_member", ignoreCase = true)) {
+                val adminDoc = firestore.collection("admins").document(uid).get().await()
+                if (adminDoc.exists()) {
+                    role = (adminDoc.getString("role") ?: "admin").trim()
+                }
+            }
+            role.ifBlank { "team_member" }
         } catch (_: Exception) {
             "team_member"
         }

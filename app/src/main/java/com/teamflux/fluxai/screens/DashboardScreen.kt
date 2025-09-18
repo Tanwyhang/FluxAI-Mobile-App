@@ -34,12 +34,22 @@ fun DashboardScreen(
     val uiState by viewModel.uiState.collectAsState()
     var isSyncing by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) { viewModel.ensureRoleState() }
+
+    // Added mode label derivation
+    val modeLabel = when (uiState) {
+        is DashboardUiState.Admin -> "ADMIN"
+        is DashboardUiState.Team -> "EMPLOYEE"
+        is DashboardUiState.Loading -> "LOADING"
+        is DashboardUiState.Error -> "ERROR"
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        HeaderBar(isSyncing = isSyncing, onRefresh = {
+        HeaderBar(modeLabel = modeLabel, isSyncing = isSyncing, onRefresh = {
             isSyncing = true
             viewModel.refreshTeamPerformances()
             isSyncing = false
@@ -111,7 +121,7 @@ private fun LoadingRow(text: String) {
 }
 
 @Composable
-private fun HeaderBar(isSyncing: Boolean, onRefresh: () -> Unit) {
+private fun HeaderBar(modeLabel: String, isSyncing: Boolean, onRefresh: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -119,10 +129,13 @@ private fun HeaderBar(isSyncing: Boolean, onRefresh: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = "Dashboard",
-            style = MaterialTheme.typography.headlineMedium
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = "Dashboard",
+                style = MaterialTheme.typography.headlineMedium
+            )
+            AssistChip(onClick = {}, enabled = false, label = { Text(modeLabel) })
+        }
         Button(onClick = onRefresh, enabled = !isSyncing) {
             Text(if (isSyncing) "Syncing..." else "Refresh")
         }
